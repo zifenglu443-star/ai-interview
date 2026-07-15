@@ -273,6 +273,7 @@ export default function SetupPage() {
               rows={5}
               value={plan.topics}
             />
+            <span className="input-hint">For multiple questions, begin each one with 1., 2., 3., and so on. Wrapped text and formula lines stay with that question.</span>
           </label>
 
           <label>
@@ -324,8 +325,8 @@ export default function SetupPage() {
             />
             <span className="input-hint">
               {plan.questionBank.trim()
-                ? `Loaded: ${plan.questionBank.split(/\r?\n/).filter(Boolean).length} lines. This file will be the question plan for this interview.`
-                : "Optional. Use one question per line; uploaded questions take priority for this interview."}
+                ? "Loaded. Numbered questions and blank-separated paragraphs are kept as separate questions; wrapped text and formula lines stay with the current question. This file takes priority for this interview."
+                : "Optional. Use numbered questions or blank-separated paragraphs; wrapped text and formula lines stay with the current question. Uploaded questions take priority for this interview."}
             </span>
           </label>
 

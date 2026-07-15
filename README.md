@@ -64,6 +64,9 @@ Setup + plan preview → Waiting room → Interview + whiteboard → Report → 
   `.env` planner values for plan-generation requests only.
 - The planning provider builds a difficulty-weighted question plan. Editing role,
   focus, topics, uploaded questions, or duration invalidates the old preview.
+- When input contains `1.`, `2.`, `3.` and so on, each numbered item is one
+  question: wrapped prose and formula lines remain attached to that item. This
+  rule is used by both the planning provider and the offline fallback.
 - The selected model and Director profile are locked for the session and only
   displayed in the room.
 - Start creates a Director session; the button then becomes End interview.

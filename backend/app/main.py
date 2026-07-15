@@ -65,6 +65,9 @@ sessions: dict[str, DirectorSession] = {}
 session_last_seen: dict[str, float] = {}
 sessions_lock = Lock()
 SESSION_TTL_SECONDS = 6 * 60 * 60
+NUMBERED_QUESTION_START = re.compile(
+    r"^\s*(?:\d+|[一二三四五六七八九十]+)\s*[.)、:：]\s*(.+?)\s*$"
+)
 
 
 def prune_expired_sessions_locked(now: float) -> None:
@@ -78,13 +81,56 @@ def prune_expired_sessions_locked(now: float) -> None:
         session_last_seen.pop(session_id, None)
 
 
-def build_question_plan_from_bank(question_bank: str) -> tuple[InterviewQuestion, ...]:
-    """Turn one-question-per-line practice material into a locked session plan."""
-    prompts = [
-        line.strip().lstrip("-•0123456789. ")
-        for line in question_bank.splitlines()
+def is_numbered_question_set(material: str) -> bool:
+    """Return whether material explicitly contains separately numbered questions."""
+    return sum(
+        bool(NUMBERED_QUESTION_START.match(line))
+        for line in material.splitlines()
         if line.strip()
+    ) >= 2
+
+
+def split_question_material(material: str) -> list[str]:
+    """Preserve numbered question boundaries and their wrapped formula/text lines."""
+    lines = material.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    numbered = is_numbered_question_set(material)
+
+    if numbered:
+        questions: list[list[str]] = []
+        current: list[str] = []
+        for raw_line in lines:
+            match = NUMBERED_QUESTION_START.match(raw_line)
+            if match:
+                if current:
+                    questions.append(current)
+                current = [match.group(1)]
+            elif current and raw_line.strip():
+                # A formula or wrapped paragraph belongs to the latest numbered item.
+                current.append(raw_line.strip())
+        if current:
+            questions.append(current)
+        return ["\n".join(question).strip() for question in questions if question]
+
+    # Maintain the existing import behaviour: a non-numbered file can still use
+    # one question per physical line. Blank-separated paragraphs are kept intact.
+    paragraphs = [
+        [line.strip() for line in paragraph.splitlines() if line.strip()]
+        for paragraph in re.split(r"\n\s*\n", material.strip())
+        if paragraph.strip()
     ]
+    if len(paragraphs) > 1:
+        return ["\n".join(paragraph).strip() for paragraph in paragraphs]
+    return [line.strip() for line in lines if line.strip()]
+
+
+def normalize_question_text(value: str) -> str:
+    """Compare question text while allowing only whitespace normalization."""
+    return re.sub(r"\s+", " ", value).strip().casefold()
+
+
+def build_question_plan_from_bank(question_bank: str) -> tuple[InterviewQuestion, ...]:
+    """Turn explicit question material into a locked session plan without merging items."""
+    prompts = split_question_material(question_bank)
     return tuple(
         InterviewQuestion(
             id=f"bank-{index + 1}",
@@ -104,13 +150,20 @@ def build_interview_plan(
     api_key = browser_planner.api_key or os.environ.get("PLANNER_API_KEY") or os.environ.get("DEEPSEEK_API_KEY", "")
     model = browser_planner.model or os.environ.get("PLANNER_MODEL") or os.environ.get("DEEPSEEK_PLANNER_MODEL", "deepseek-v4-flash")
     endpoint = browser_planner.endpoint or os.environ.get("PLANNER_API_ENDPOINT", "https://api.deepseek.com/chat/completions")
-    source_questions = [line.strip().lstrip("-•0123456789. ") for line in request.question_bank.splitlines() if line.strip()]
-    source = "\n".join(f"- {question}" for question in source_questions) or request.practice_topics or "Choose appropriate interview questions."
+    source = request.question_bank.strip() or request.practice_topics.strip() or "Choose appropriate interview questions."
+    numbered_source_questions = (
+        split_question_material(source) if is_numbered_question_set(source) else []
+    )
     if api_key:
         prompt = (
             "Return JSON only with {\"questions\":[{\"id\":string,\"prompt\":string,\"focus\":string,"
             "\"follow_up_prompt\":string,\"allocated_seconds\":integer}]}. Build an interview plan from the "
-            "provided questions/topics. Preserve supplied questions where possible. Allocate the entire time "
+            "provided questions/topics. The material may contain multiple numbered questions. If it contains "
+            "N numbered or separately delimited questions, return exactly N question objects in the same order. "
+            "Every prompt must contain exactly one independently answerable original question, including its "
+            "continuation lines and formulae. Never merge separate questions, split one question into several "
+            "objects, add generic opening/behavioural/closing questions, or prepend wording such as 'Explain'. "
+            "Preserve supplied wording except for harmless whitespace. Allocate the entire time "
             "budget across 1-20 questions. This is a flexible reference budget, not a rigid schedule: allow "
             "reasonable variance and leave room to shorten or skip lower-value questions. Do not distribute "
             "time evenly. Give more time to questions with greater conceptual difficulty, implementation or "
@@ -118,7 +171,7 @@ def build_interview_plan(
             "give less time to introductory or verification questions. Prioritize independent problem completion "
             "and depth of reasoning over getting a final answer exactly right. "
             f"Role: {request.target_role or 'general'}. Focus: {request.practice_focus}. "
-            f"Total seconds: {request.total_duration_seconds}. Material:\n{source}"
+            f"Total seconds: {request.total_duration_seconds}. Source material (preserve boundaries exactly):\n---\n{source}\n---"
         )
         try:
             response = httpx.post(
@@ -141,11 +194,26 @@ def build_interview_plan(
                 for index, item in enumerate(payload.get("questions", [])[:20])
                 if str(item.get("prompt", "")).strip()
             )
-            if questions and len({question.id for question in questions}) == len(questions):
+            preserves_numbered_source = not numbered_source_questions or (
+                len(questions) == len(numbered_source_questions)
+                and all(
+                    normalize_question_text(question.prompt)
+                    == normalize_question_text(source_question)
+                    for question, source_question in zip(questions, numbered_source_questions)
+                )
+            )
+            if (
+                questions
+                and len({question.id for question in questions}) == len(questions)
+                and preserves_numbered_source
+            ):
                 return normalize_plan_allocations(questions, request.total_duration_seconds), "provider"
         except (httpx.HTTPError, KeyError, TypeError, ValueError, json.JSONDecodeError):
             pass
-    fallback = build_question_plan_from_bank(request.question_bank)
+    direct_questions = request.question_bank or (
+        request.practice_topics if is_numbered_question_set(request.practice_topics) else ""
+    )
+    fallback = build_question_plan_from_bank(direct_questions)
     if not fallback:
         fallback = director_engine.start(
             practice_focus=request.practice_focus,
@@ -468,7 +536,14 @@ def start_interview(
             allocated_seconds=question.allocated_seconds,
         )
         for question in request.planned_questions
-    ) or build_question_plan_from_bank(request.question_bank)
+    ) or build_question_plan_from_bank(
+        request.question_bank
+        or (
+            request.practice_topics
+            if is_numbered_question_set(request.practice_topics)
+            else ""
+        )
+    )
     if question_plan and len({question.id for question in question_plan}) != len(
         question_plan
     ):

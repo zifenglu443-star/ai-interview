@@ -40,6 +40,7 @@ export type PlannedInterviewQuestion = {
 };
 
 export type PracticePlan = {
+  planFormatVersion: 2;
   targetRole: string;
   focus: PracticeFocus;
   topics: string;
@@ -55,6 +56,7 @@ export type PracticePlan = {
 export const practicePlanStorageKey = "ai-interview-simulator.practice-plan";
 
 export const defaultPracticePlan: PracticePlan = {
+  planFormatVersion: 2,
   targetRole: "Student or internship role",
   focus: "behavioral",
   topics: "",
@@ -101,6 +103,7 @@ export function loadPracticePlan(): PracticePlan {
     }
     const parsed = JSON.parse(stored) as Partial<PracticePlan>;
     return {
+      planFormatVersion: 2,
       targetRole: parsed.targetRole?.trim() || defaultPracticePlan.targetRole,
       focus: isPracticeFocus(parsed.focus) ? parsed.focus : defaultPracticePlan.focus,
       topics: parsed.topics?.trim() ?? "",
@@ -115,7 +118,12 @@ export function loadPracticePlan(): PracticePlan {
       liveApis: parseLiveApis(parsed.liveApis),
       plannerApi: parsePlannerApi(parsed.plannerApi),
       directorSettings: parseDirectorSettings(parsed.directorSettings),
-      plannedQuestions: parsePlannedQuestions(parsed.plannedQuestions),
+      // Earlier previews could merge numbered questions into one prompt. Require
+      // regeneration after the question-boundary format changed.
+      plannedQuestions:
+        parsed.planFormatVersion === 2
+          ? parsePlannedQuestions(parsed.plannedQuestions)
+          : [],
     };
   } catch {
     return defaultPracticePlan;

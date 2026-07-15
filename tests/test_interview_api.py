@@ -91,6 +91,88 @@ def test_plan_api_reports_deterministic_fallback_and_preserves_total_time(monkey
     assert sum(question["allocated_seconds"] for question in payload["questions"]) == 600
 
 
+def test_plan_fallback_keeps_numbered_multiline_topics_as_separate_questions(monkeypatch) -> None:
+    monkeypatch.delenv("PLANNER_API_KEY", raising=False)
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    topics = """1. Consider the function
+f(x)=x^3-3x. Find the values of k for which f(x)=k has three distinct real solutions.
+2. A fair coin is tossed until two consecutive heads appear. Find the expected toss count.
+3. Without a calculator, determine which is larger: 2^(100) or 3^(60)."""
+
+    response = client.post(
+        "/interview/plan",
+        json={"practice_topics": topics, "total_duration_seconds": 900},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["provider"] == "fallback"
+    assert [question["prompt"] for question in payload["questions"]] == [
+        "Consider the function\nf(x)=x^3-3x. Find the values of k for which f(x)=k has three distinct real solutions.",
+        "A fair coin is tossed until two consecutive heads appear. Find the expected toss count.",
+        "Without a calculator, determine which is larger: 2^(100) or 3^(60).",
+    ]
+    assert sum(question["allocated_seconds"] for question in payload["questions"]) == 900
+
+
+def test_start_keeps_numbered_topic_questions_separate() -> None:
+    response = client.post(
+        "/interview/start",
+        json={
+            "practice_topics": "1. First solve this.\nwith a continuation.\n2. Then compare the alternatives.",
+        },
+    )
+
+    assert response.status_code == 200
+    assert [question["prompt"] for question in response.json()["question_plan"]] == [
+        "First solve this.\nwith a continuation.",
+        "Then compare the alternatives.",
+    ]
+
+
+def test_plan_rejects_provider_output_that_merges_numbered_questions(monkeypatch) -> None:
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "content": json.dumps(
+                                {
+                                    "questions": [
+                                        {
+                                            "id": "merged",
+                                            "prompt": "Explain all supplied questions.",
+                                            "allocated_seconds": 600,
+                                        }
+                                    ]
+                                }
+                            )
+                        }
+                    }
+                ]
+            }
+
+    monkeypatch.setattr(main.httpx, "post", lambda *_args, **_kwargs: FakeResponse())
+    response = client.post(
+        "/interview/plan",
+        json={
+            "practice_topics": "1. First independent problem.\n2. Second independent problem.",
+            "planner": {"api_key": "browser-key", "endpoint": "https://planner.example/v1", "model": "test"},
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["provider"] == "fallback"
+    assert [question["prompt"] for question in response.json()["questions"]] == [
+        "First independent problem.",
+        "Second independent problem.",
+    ]
+
+
 def test_plan_api_accepts_browser_planner_settings(monkeypatch) -> None:
     monkeypatch.delenv("PLANNER_API_KEY", raising=False)
     monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
@@ -150,6 +232,9 @@ def test_plan_api_accepts_browser_planner_settings(monkeypatch) -> None:
         "Authorization": "Bearer browser-key",
         "Content-Type": "application/json",
     }
+    prompt = captured["json"]["messages"][1]["content"]  # type: ignore[index]
+    assert "return exactly N question objects" in prompt
+    assert "Never merge separate questions" in prompt
 
 
 def test_plan_api_rejects_non_https_browser_planner_endpoint() -> None:
