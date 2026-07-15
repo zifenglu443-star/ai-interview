@@ -40,7 +40,7 @@ export type PlannedInterviewQuestion = {
 };
 
 export type PracticePlan = {
-  planFormatVersion: 2;
+  planFormatVersion: 3;
   targetRole: string;
   focus: PracticeFocus;
   topics: string;
@@ -56,7 +56,7 @@ export type PracticePlan = {
 export const practicePlanStorageKey = "ai-interview-simulator.practice-plan";
 
 export const defaultPracticePlan: PracticePlan = {
-  planFormatVersion: 2,
+  planFormatVersion: 3,
   targetRole: "Student or internship role",
   focus: "behavioral",
   topics: "",
@@ -103,7 +103,7 @@ export function loadPracticePlan(): PracticePlan {
     }
     const parsed = JSON.parse(stored) as Partial<PracticePlan>;
     return {
-      planFormatVersion: 2,
+      planFormatVersion: 3,
       targetRole: parsed.targetRole?.trim() || defaultPracticePlan.targetRole,
       focus: isPracticeFocus(parsed.focus) ? parsed.focus : defaultPracticePlan.focus,
       topics: parsed.topics?.trim() ?? "",
@@ -115,13 +115,20 @@ export function loadPracticePlan(): PracticePlan {
         typeof parsed.allowAiWhiteboardAnnotations === "boolean"
           ? parsed.allowAiWhiteboardAnnotations
           : defaultPracticePlan.allowAiWhiteboardAnnotations,
-      liveApis: parseLiveApis(parsed.liveApis),
-      plannerApi: parsePlannerApi(parsed.plannerApi),
+      // Version 3 deliberately clears browser-stored API values. They can
+      // override the fresh project .env values and make a valid replacement key
+      // appear broken until the user manually clears old local storage.
+      liveApis: parsed.planFormatVersion === 3
+        ? parseLiveApis(parsed.liveApis)
+        : defaultPracticePlan.liveApis,
+      plannerApi: parsed.planFormatVersion === 3
+        ? parsePlannerApi(parsed.plannerApi)
+        : defaultPracticePlan.plannerApi,
       directorSettings: parseDirectorSettings(parsed.directorSettings),
       // Earlier previews could merge numbered questions into one prompt. Require
       // regeneration after the question-boundary format changed.
       plannedQuestions:
-        parsed.planFormatVersion === 2
+        parsed.planFormatVersion === 3
           ? parsePlannedQuestions(parsed.plannedQuestions)
           : [],
     };

@@ -36,12 +36,18 @@ from reporting import AnswerInput, evaluate_answers
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 INTERVIEW_RECORDS_DIRECTORY = PROJECT_ROOT / "data" / "interview_records"
-load_dotenv(PROJECT_ROOT / ".env")
+# This is a local desktop app: the project .env is the user-controlled source
+# of truth and must replace stale values inherited by an older launcher shell.
+load_dotenv(PROJECT_ROOT / ".env", override=True)
 truststore.inject_into_ssl()
 
 GOOGLE_LIVE_ENDPOINT = (
     "wss://generativelanguage.googleapis.com/ws/"
     "google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent"
+)
+GOOGLE_LIVE_EPHEMERAL_ENDPOINT = (
+    "wss://generativelanguage.googleapis.com/ws/"
+    "google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContentConstrained"
 )
 
 app = FastAPI(
@@ -1047,7 +1053,14 @@ async def google_live_proxy(
         "GOOGLE_LIVE_MODEL",
         "gemini-3.1-flash-live-preview",
     )
-    google_url = f"{GOOGLE_LIVE_ENDPOINT}?key={quote(api_key, safe='')}"
+    # Gemini ephemeral tokens use the documented AQ.* form and must use the
+    # v1alpha constrained endpoint with access_token, not the normal API-key URL.
+    if api_key.startswith("AQ."):
+        google_url = (
+            f"{GOOGLE_LIVE_EPHEMERAL_ENDPOINT}?access_token={quote(api_key, safe='')}"
+        )
+    else:
+        google_url = f"{GOOGLE_LIVE_ENDPOINT}?key={quote(api_key, safe='')}"
 
     try:
         async with websockets.connect(
@@ -1083,11 +1096,17 @@ async def google_live_proxy(
             await asyncio.gather(*relays, return_exceptions=True)
     except WebSocketDisconnect:
         return
-    except Exception:
-        try:
-            await browser_socket.send_json(
-                {"error": {"message": "Gemini Live connection failed."}},
+    except Exception as error:
+        upstream_message = str(error).lower()
+        if "auth token" in upstream_message or "authentication" in upstream_message:
+            message = (
+                "Gemini Live authentication failed. Use a valid Google AI Studio API key "
+                "or a fresh Gemini ephemeral token."
             )
+        else:
+            message = "Gemini Live connection failed."
+        try:
+            await browser_socket.send_json({"error": {"message": message}})
             await browser_socket.close(code=1011)
         except RuntimeError:
             return

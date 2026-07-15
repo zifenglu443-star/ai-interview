@@ -129,6 +129,7 @@ export default function SettingsPage() {
 
           <fieldset className="director-setup-panel">
             <legend>Google Gemini Live</legend>
+            <p className="input-hint">Use a Google AI Studio API key. Gemini ephemeral tokens are short-lived and must be freshly issued by Google before use.</p>
             <label>
               API key
               <input
