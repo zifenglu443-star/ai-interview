@@ -70,6 +70,15 @@ NUMBERED_QUESTION_START = re.compile(
 )
 
 
+class PlanningError(Exception):
+    """A visible failure from the required text-planning provider."""
+
+    def __init__(self, detail: str, status_code: int = 503) -> None:
+        super().__init__(detail)
+        self.detail = detail
+        self.status_code = status_code
+
+
 def prune_expired_sessions_locked(now: float) -> None:
     expired = [
         session_id
@@ -144,8 +153,8 @@ def build_question_plan_from_bank(question_bank: str) -> tuple[InterviewQuestion
 
 def build_interview_plan(
     request: "PlanInterviewRequest",
-) -> tuple[tuple[InterviewQuestion, ...], Literal["provider", "fallback"]]:
-    """Use the configured planning provider, with a deterministic local fallback."""
+) -> tuple[tuple[InterviewQuestion, ...], Literal["provider"]]:
+    """Generate every plan through the configured text-planning provider."""
     browser_planner = request.planner
     api_key = browser_planner.api_key or os.environ.get("PLANNER_API_KEY") or os.environ.get("DEEPSEEK_API_KEY", "")
     model = browser_planner.model or os.environ.get("PLANNER_MODEL") or os.environ.get("DEEPSEEK_PLANNER_MODEL", "deepseek-v4-flash")
@@ -154,73 +163,77 @@ def build_interview_plan(
     numbered_source_questions = (
         split_question_material(source) if is_numbered_question_set(source) else []
     )
-    if api_key:
-        prompt = (
-            "Return JSON only with {\"questions\":[{\"id\":string,\"prompt\":string,\"focus\":string,"
-            "\"follow_up_prompt\":string,\"allocated_seconds\":integer}]}. Build an interview plan from the "
-            "provided questions/topics. The material may contain multiple numbered questions. If it contains "
-            "N numbered or separately delimited questions, return exactly N question objects in the same order. "
-            "Every prompt must contain exactly one independently answerable original question, including its "
-            "continuation lines and formulae. Never merge separate questions, split one question into several "
-            "objects, add generic opening/behavioural/closing questions, or prepend wording such as 'Explain'. "
-            "Preserve supplied wording except for harmless whitespace. Allocate the entire time "
-            "budget across 1-20 questions. This is a flexible reference budget, not a rigid schedule: allow "
-            "reasonable variance and leave room to shorten or skip lower-value questions. Do not distribute "
-            "time evenly. Give more time to questions with greater conceptual difficulty, implementation or "
-            "systems complexity, ambiguity, tradeoff analysis, and opportunity to observe independent reasoning; "
-            "give less time to introductory or verification questions. Prioritize independent problem completion "
-            "and depth of reasoning over getting a final answer exactly right. "
-            f"Role: {request.target_role or 'general'}. Focus: {request.practice_focus}. "
-            f"Total seconds: {request.total_duration_seconds}. Source material (preserve boundaries exactly):\n---\n{source}\n---"
+    if not api_key:
+        raise PlanningError("Planning API key is not configured. Add it in Settings or .env.")
+    prompt = (
+        "Return JSON only with {\"questions\":[{\"id\":string,\"prompt\":string,\"focus\":string,"
+        "\"follow_up_prompt\":string,\"allocated_seconds\":integer}]}. Build an interview plan from the "
+        "provided questions/topics. The material may contain multiple numbered questions. If it contains "
+        "N numbered or separately delimited questions, return exactly N question objects in the same order. "
+        "Every prompt must contain exactly one independently answerable original question, including its "
+        "continuation lines and formulae. Never merge separate questions, split one question into several "
+        "objects, add generic opening/behavioural/closing questions, or prepend wording such as 'Explain'. "
+        "Preserve supplied wording except for harmless whitespace. "
+        "If the source is a list of topic fragments rather than complete questions, create one concrete, "
+        "independently answerable interview question for each supplied topic, in source order, then allocate time. "
+        "Allocate the entire time budget across 1-20 questions. This is a flexible reference budget, not a rigid schedule: allow "
+        "reasonable variance and leave room to shorten or skip lower-value questions. Do not distribute "
+        "time evenly. Give more time to questions with greater conceptual difficulty, implementation or "
+        "systems complexity, ambiguity, tradeoff analysis, and opportunity to observe independent reasoning; "
+        "give less time to introductory or verification questions. Prioritize independent problem completion "
+        "and depth of reasoning over getting a final answer exactly right. "
+        f"Role: {request.target_role or 'general'}. Focus: {request.practice_focus}. "
+        f"Total seconds: {request.total_duration_seconds}. Source material (preserve boundaries exactly):\n---\n{source}\n---"
+    )
+    try:
+        response = httpx.post(
+            endpoint,
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json={"model": model, "messages": [{"role": "system", "content": "You create precise interview plans."}, {"role": "user", "content": prompt}], "temperature": 0.2},
+            timeout=30,
         )
-        try:
-            response = httpx.post(
-                endpoint,
-                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-                json={"model": model, "messages": [{"role": "system", "content": "You create precise interview plans."}, {"role": "user", "content": prompt}], "temperature": 0.2},
-                timeout=30,
-            )
-            response.raise_for_status()
-            content = response.json()["choices"][0]["message"]["content"]
-            payload = json.loads(re.sub(r"^```(?:json)?|```$", "", content.strip()).strip())
-            questions = tuple(
-                InterviewQuestion(
+        response.raise_for_status()
+        content = response.json()["choices"][0]["message"]["content"]
+        payload = json.loads(re.sub(r"^```(?:json)?|```$", "", content.strip()).strip())
+        questions = tuple(
+            InterviewQuestion(
                     id=str(item.get("id") or f"plan-{index + 1}").strip(),
                     prompt=str(item["prompt"]).strip(),
                     focus=str(item.get("focus") or "Interview question").strip(),
                     follow_up_prompt=str(item.get("follow_up_prompt") or "What assumption or tradeoff mattered most?").strip(),
                     allocated_seconds=max(30, int(item.get("allocated_seconds") or 0)),
-                )
-                for index, item in enumerate(payload.get("questions", [])[:20])
-                if str(item.get("prompt", "")).strip()
             )
-            preserves_numbered_source = not numbered_source_questions or (
-                len(questions) == len(numbered_source_questions)
-                and all(
-                    normalize_question_text(question.prompt)
-                    == normalize_question_text(source_question)
-                    for question, source_question in zip(questions, numbered_source_questions)
-                )
+            for index, item in enumerate(payload.get("questions", [])[:20])
+            if str(item.get("prompt", "")).strip()
+        )
+        preserves_numbered_source = not numbered_source_questions or (
+            len(questions) == len(numbered_source_questions)
+            and all(
+                normalize_question_text(question.prompt)
+                == normalize_question_text(source_question)
+                for question, source_question in zip(questions, numbered_source_questions)
             )
-            if (
-                questions
-                and len({question.id for question in questions}) == len(questions)
-                and preserves_numbered_source
-            ):
-                return normalize_plan_allocations(questions, request.total_duration_seconds), "provider"
-        except (httpx.HTTPError, KeyError, TypeError, ValueError, json.JSONDecodeError):
-            pass
-    direct_questions = request.question_bank or (
-        request.practice_topics if is_numbered_question_set(request.practice_topics) else ""
-    )
-    fallback = build_question_plan_from_bank(direct_questions)
-    if not fallback:
-        fallback = director_engine.start(
-            practice_focus=request.practice_focus,
-            practice_topics=request.practice_topics,
-            target_role=request.target_role,
-        ).question_plan
-    return normalize_plan_allocations(fallback, request.total_duration_seconds), "fallback"
+        )
+        if not questions:
+            raise PlanningError("Planning API returned no questions.", status_code=502)
+        if len({question.id for question in questions}) != len(questions):
+            raise PlanningError("Planning API returned duplicate question IDs.", status_code=502)
+        if not preserves_numbered_source:
+            raise PlanningError(
+                "Planning API changed or merged the numbered questions. Please generate again.",
+                status_code=502,
+            )
+        return normalize_plan_allocations(questions, request.total_duration_seconds), "provider"
+    except httpx.HTTPStatusError as error:
+        if error.response.status_code == 401:
+            raise PlanningError("Planning API rejected the configured API key (HTTP 401).") from error
+        raise PlanningError(
+            f"Planning API request failed (HTTP {error.response.status_code})."
+        ) from error
+    except httpx.HTTPError as error:
+        raise PlanningError("Planning API could not be reached. Check the endpoint and network.") from error
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+        raise PlanningError("Planning API returned an invalid plan response.", status_code=502) from error
 
 
 def normalize_plan_allocations(
@@ -536,14 +549,12 @@ def start_interview(
             allocated_seconds=question.allocated_seconds,
         )
         for question in request.planned_questions
-    ) or build_question_plan_from_bank(
-        request.question_bank
-        or (
-            request.practice_topics
-            if is_numbered_question_set(request.practice_topics)
-            else ""
-        )
     )
+    if not question_plan and (request.question_bank.strip() or request.practice_topics.strip()):
+        raise HTTPException(
+            status_code=422,
+            detail="Generate a text-model interview plan before starting this interview.",
+        )
     if question_plan and len({question.id for question in question_plan}) != len(
         question_plan
     ):
@@ -571,7 +582,10 @@ def start_interview(
 
 @app.post("/interview/plan")
 def plan_interview(request: PlanInterviewRequest) -> InterviewPlanResponse:
-    questions, source = build_interview_plan(request)
+    try:
+        questions, source = build_interview_plan(request)
+    except PlanningError as error:
+        raise HTTPException(status_code=error.status_code, detail=error.detail) from error
     return InterviewPlanResponse(
         provider=source,
         model=request.planner.model

@@ -10,7 +10,7 @@ Browser (Next.js, 127.0.0.1:3001)
                   │
                   ▼
 FastAPI (127.0.0.1:8000)
-  ├─ Planning-provider adapter with deterministic fallback
+  ├─ Required planning-provider adapter
   ├─ Director session endpoints
   ├─ Gemini WebSocket proxy
   ├─ OpenAI ephemeral client-secret creation
@@ -51,7 +51,7 @@ cannot survive a backend restart.
 | Route | Responsibility |
 |---|---|
 | `GET /health` | Launcher readiness check |
-| `POST /interview/plan` | Provider-backed or deterministic plan creation |
+| `POST /interview/plan` | Required provider-backed plan creation |
 | `POST /interview/start` | Create and lock one Director session |
 | `POST /interview/answer` | Record typed fallback input and advance |
 | `POST /interview/live-control` | Review a Gemini control/whiteboard proposal |

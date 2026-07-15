@@ -574,9 +574,9 @@ export default function InterviewPage() {
         void handleStartGoogleVoice(nextSession);
       }
       await cameraPromise;
-    } catch {
+    } catch (error) {
       stopCamera();
-      setError("Director Engine is unavailable. Start the Python backend first.");
+      setError(error instanceof Error ? error.message : "Could not start the interview.");
     } finally {
       setIsStarting(false);
     }
@@ -2024,7 +2024,8 @@ async function callBackend<T>(path: string, body?: object): Promise<T> {
   });
 
   if (!response.ok) {
-    throw new Error(`Director request failed: ${response.status}`);
+    const payload = await response.json().catch(() => null) as { detail?: string } | null;
+    throw new Error(payload?.detail || `Director request failed: ${response.status}`);
   }
 
   return response.json() as Promise<T>;

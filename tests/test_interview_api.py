@@ -27,21 +27,41 @@ def test_start_interview_api_accepts_a_practice_plan() -> None:
             "target_role": "Data Science Intern",
             "practice_focus": "project",
             "practice_topics": "my forecasting project",
+            "planned_questions": [
+                {
+                    "id": "forecasting",
+                    "prompt": "Walk me through my forecasting project.",
+                    "focus": "Project deep dive",
+                    "follow_up_prompt": "How did you validate it?",
+                }
+            ],
         },
     )
 
     assert response.status_code == 200
     payload = response.json()
     assert payload["current_focus"] == "Project deep dive"
-    assert "my forecasting project" in payload["current_prompt"]
-    assert "Data Science Intern" in payload["current_prompt"]
+    assert payload["current_prompt"] == "Walk me through my forecasting project."
 
 
-def test_start_interview_api_locks_an_imported_question_bank() -> None:
+def test_start_interview_api_locks_a_generated_question_plan() -> None:
     response = client.post(
         "/interview/start",
         json={
-            "question_bank": "Explain a difficult system you built.\nHow did you measure its impact?",
+            "planned_questions": [
+                {
+                    "id": "one",
+                    "prompt": "Explain a difficult system you built.",
+                    "focus": "Imported question",
+                    "follow_up_prompt": "What was the tradeoff?",
+                },
+                {
+                    "id": "two",
+                    "prompt": "How did you measure its impact?",
+                    "focus": "Imported question",
+                    "follow_up_prompt": "What did the result show?",
+                },
+            ],
             "director_config": {"total_duration_seconds": 600},
         },
     )
@@ -70,7 +90,7 @@ def test_start_rejects_duplicate_planned_question_ids() -> None:
     assert response.status_code == 422
 
 
-def test_plan_api_reports_deterministic_fallback_and_preserves_total_time(monkeypatch) -> None:
+def test_plan_api_requires_a_configured_text_model(monkeypatch) -> None:
     monkeypatch.delenv("PLANNER_API_KEY", raising=False)
     monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
     response = client.post(
@@ -81,32 +101,36 @@ def test_plan_api_reports_deterministic_fallback_and_preserves_total_time(monkey
         },
     )
 
-    assert response.status_code == 200
-    payload = response.json()
-    assert payload["provider"] == "fallback"
-    assert [question["prompt"] for question in payload["questions"]] == [
-        "Explain a cache.",
-        "Discuss cache invalidation.",
-    ]
-    assert sum(question["allocated_seconds"] for question in payload["questions"]) == 600
+    assert response.status_code == 503
+    assert response.json()["detail"] == "Planning API key is not configured. Add it in Settings or .env."
 
 
-def test_plan_fallback_keeps_numbered_multiline_topics_as_separate_questions(monkeypatch) -> None:
-    monkeypatch.delenv("PLANNER_API_KEY", raising=False)
-    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+def test_plan_provider_keeps_numbered_multiline_topics_as_separate_questions(monkeypatch) -> None:
     topics = """1. Consider the function
 f(x)=x^3-3x. Find the values of k for which f(x)=k has three distinct real solutions.
 2. A fair coin is tossed until two consecutive heads appear. Find the expected toss count.
 3. Without a calculator, determine which is larger: 2^(100) or 3^(60)."""
 
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {"choices": [{"message": {"content": json.dumps({"questions": [
+                {"id": "one", "prompt": "Consider the function\nf(x)=x^3-3x. Find the values of k for which f(x)=k has three distinct real solutions."},
+                {"id": "two", "prompt": "A fair coin is tossed until two consecutive heads appear. Find the expected toss count."},
+                {"id": "three", "prompt": "Without a calculator, determine which is larger: 2^(100) or 3^(60)."},
+            ]})}}]}
+
+    monkeypatch.setattr(main.httpx, "post", lambda *_args, **_kwargs: FakeResponse())
     response = client.post(
         "/interview/plan",
-        json={"practice_topics": topics, "total_duration_seconds": 900},
+        json={"practice_topics": topics, "total_duration_seconds": 900, "planner": {"api_key": "test"}},
     )
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["provider"] == "fallback"
+    assert payload["provider"] == "provider"
     assert [question["prompt"] for question in payload["questions"]] == [
         "Consider the function\nf(x)=x^3-3x. Find the values of k for which f(x)=k has three distinct real solutions.",
         "A fair coin is tossed until two consecutive heads appear. Find the expected toss count.",
@@ -115,7 +139,7 @@ f(x)=x^3-3x. Find the values of k for which f(x)=k has three distinct real solut
     assert sum(question["allocated_seconds"] for question in payload["questions"]) == 900
 
 
-def test_start_keeps_numbered_topic_questions_separate() -> None:
+def test_start_requires_a_generated_plan_for_supplied_topics() -> None:
     response = client.post(
         "/interview/start",
         json={
@@ -123,11 +147,8 @@ def test_start_keeps_numbered_topic_questions_separate() -> None:
         },
     )
 
-    assert response.status_code == 200
-    assert [question["prompt"] for question in response.json()["question_plan"]] == [
-        "First solve this.\nwith a continuation.",
-        "Then compare the alternatives.",
-    ]
+    assert response.status_code == 422
+    assert response.json()["detail"] == "Generate a text-model interview plan before starting this interview."
 
 
 def test_plan_rejects_provider_output_that_merges_numbered_questions(monkeypatch) -> None:
@@ -165,12 +186,8 @@ def test_plan_rejects_provider_output_that_merges_numbered_questions(monkeypatch
         },
     )
 
-    assert response.status_code == 200
-    assert response.json()["provider"] == "fallback"
-    assert [question["prompt"] for question in response.json()["questions"]] == [
-        "First independent problem.",
-        "Second independent problem.",
-    ]
+    assert response.status_code == 502
+    assert "changed or merged" in response.json()["detail"]
 
 
 def test_plan_api_accepts_browser_planner_settings(monkeypatch) -> None:
@@ -235,6 +252,7 @@ def test_plan_api_accepts_browser_planner_settings(monkeypatch) -> None:
     prompt = captured["json"]["messages"][1]["content"]  # type: ignore[index]
     assert "return exactly N question objects" in prompt
     assert "Never merge separate questions" in prompt
+    assert "one concrete, independently answerable interview question for each supplied topic" in prompt
 
 
 def test_plan_api_rejects_non_https_browser_planner_endpoint() -> None:
