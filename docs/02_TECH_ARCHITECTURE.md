@@ -22,8 +22,8 @@ Director Engine (pure Python state machine)
 
 ## Ownership
 
-- `PracticePlan` owns pre-session role, focus, topic, voice provider, and the
-  editable Director settings.
+- `PracticePlan` owns pre-session role, focus, topic, voice provider, editable
+  Director settings, and optional local-browser planning-model settings.
 - `DirectorSession` owns Start/End state, current question, answers, pressure,
   approved control signals, and an immutable copy of `DirectorConfig`.
 - Voice providers generate conversation but cannot directly mutate or end the Director.
@@ -77,6 +77,11 @@ has one adapter and live interviewing has one route per supported voice protocol
 The browser sends a Gemini key in the first WebSocket message, not in the URL.
 The proxy then creates the upstream provider socket. This keeps the key out of
 local access-log URLs. Browser-stored keys still carry normal localStorage/XSS risk.
+
+The optional planning text-model key, endpoint, and model are sent only with
+`POST /interview/plan` to the local backend. Per-request endpoints must be valid
+HTTPS URLs without embedded credentials; this permits local user configuration
+without allowing the browser to request arbitrary local-network URLs.
 
 ## Whiteboard synchronization
 

@@ -55,6 +55,9 @@ Setup + plan preview → Waiting room → Interview + whiteboard → Report → 
 ```
 
 - Setup chooses role, focus, reference duration, voice model, and Director profile.
+- Settings also contains a provider-neutral Planning text model section. Its
+  browser-stored HTTPS endpoint, API key, and model override the corresponding
+  `.env` planner values for plan-generation requests only.
 - The planning provider builds a difficulty-weighted question plan. Editing role,
   focus, topics, uploaded questions, or duration invalidates the old preview.
 - The selected model and Director profile are locked for the session and only

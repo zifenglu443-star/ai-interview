@@ -91,6 +91,82 @@ def test_plan_api_reports_deterministic_fallback_and_preserves_total_time(monkey
     assert sum(question["allocated_seconds"] for question in payload["questions"]) == 600
 
 
+def test_plan_api_accepts_browser_planner_settings(monkeypatch) -> None:
+    monkeypatch.delenv("PLANNER_API_KEY", raising=False)
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    captured: dict[str, object] = {}
+
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "content": json.dumps(
+                                {
+                                    "questions": [
+                                        {
+                                            "id": "browser-plan",
+                                            "prompt": "Explain your approach.",
+                                            "focus": "Reasoning",
+                                            "follow_up_prompt": "What would you validate?",
+                                            "allocated_seconds": 600,
+                                        }
+                                    ]
+                                }
+                            )
+                        }
+                    }
+                ]
+            }
+
+    def fake_post(endpoint: str, **kwargs: object) -> FakeResponse:
+        captured["endpoint"] = endpoint
+        captured["headers"] = kwargs["headers"]
+        captured["json"] = kwargs["json"]
+        return FakeResponse()
+
+    monkeypatch.setattr(main.httpx, "post", fake_post)
+    response = client.post(
+        "/interview/plan",
+        json={
+            "total_duration_seconds": 600,
+            "planner": {
+                "api_key": "browser-key",
+                "endpoint": "https://planner.example/v1/chat/completions",
+                "model": "planning-model",
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["provider"] == "provider"
+    assert response.json()["model"] == "planning-model"
+    assert captured["endpoint"] == "https://planner.example/v1/chat/completions"
+    assert captured["headers"] == {
+        "Authorization": "Bearer browser-key",
+        "Content-Type": "application/json",
+    }
+
+
+def test_plan_api_rejects_non_https_browser_planner_endpoint() -> None:
+    response = client.post(
+        "/interview/plan",
+        json={
+            "planner": {
+                "api_key": "browser-key",
+                "endpoint": "http://127.0.0.1:8000/unsafe",
+                "model": "planning-model",
+            }
+        },
+    )
+
+    assert response.status_code == 422
+
+
 def test_start_interview_api_locks_the_director_configuration() -> None:
     response = client.post(
         "/interview/start",

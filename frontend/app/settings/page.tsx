@@ -33,6 +33,18 @@ export default function SettingsPage() {
     setSaveError(false);
   }
 
+  function updatePlannerApi(
+    field: "apiKey" | "endpoint" | "model",
+    value: string,
+  ) {
+    setPlan((current) => ({
+      ...current,
+      plannerApi: { ...current.plannerApi, [field]: value },
+    }));
+    setSaved(false);
+    setSaveError(false);
+  }
+
   function save() {
     try {
       savePracticePlan(plan);
@@ -57,7 +69,8 @@ export default function SettingsPage() {
           <h1>Configure providers once, choose one per interview.</h1>
           <p>
             These keys are stored only in this browser. Setup chooses the Live
-            interviewer; question files and interview planning belong to Setup.
+            interviewer. The text planner is configured below and used whenever
+            Setup generates an interview plan.
             For safer long-term use, prefer project environment keys because
             same-origin browser scripts can read local storage.
           </p>
@@ -79,6 +92,37 @@ export default function SettingsPage() {
               <input
                 onChange={(event) => updateLiveApi("openai", "model", event.target.value)}
                 value={plan.liveApis.openai.model}
+              />
+            </label>
+          </fieldset>
+
+          <fieldset className="director-setup-panel">
+            <legend>Planning text model</legend>
+            <p className="input-hint">Use any compatible HTTPS chat-completions endpoint. These values stay in this browser and are sent only to the local backend when a plan is generated.</p>
+            <label>
+              API key
+              <input
+                onChange={(event) => updatePlannerApi("apiKey", event.target.value)}
+                placeholder="Leave blank to use PLANNER_API_KEY from .env"
+                type="password"
+                value={plan.plannerApi.apiKey}
+              />
+            </label>
+            <label>
+              Endpoint
+              <input
+                onChange={(event) => updatePlannerApi("endpoint", event.target.value)}
+                placeholder="https://provider.example/v1/chat/completions"
+                type="url"
+                value={plan.plannerApi.endpoint}
+              />
+            </label>
+            <label>
+              Model
+              <input
+                onChange={(event) => updatePlannerApi("model", event.target.value)}
+                placeholder="Your planning model ID"
+                value={plan.plannerApi.model}
               />
             </label>
           </fieldset>

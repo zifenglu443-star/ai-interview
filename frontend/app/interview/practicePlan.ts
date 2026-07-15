@@ -25,6 +25,12 @@ export type LiveApiSettings = {
   model: string;
 };
 
+export type PlannerApiSettings = {
+  apiKey: string;
+  endpoint: string;
+  model: string;
+};
+
 export type PlannedInterviewQuestion = {
   id: string;
   prompt: string;
@@ -41,6 +47,7 @@ export type PracticePlan = {
   questionBank: string;
   allowAiWhiteboardAnnotations: boolean;
   liveApis: Record<VoiceProviderId, LiveApiSettings>;
+  plannerApi: PlannerApiSettings;
   directorSettings: DirectorSettings;
   plannedQuestions: PlannedInterviewQuestion[];
 };
@@ -58,6 +65,7 @@ export const defaultPracticePlan: PracticePlan = {
     openai: { apiKey: "", model: "gpt-realtime-2.1" },
     google: { apiKey: "", model: "gemini-3.1-flash-live-preview" },
   },
+  plannerApi: { apiKey: "", endpoint: "", model: "" },
   directorSettings: {
     interviewerStyle: "professional",
     initialPressure: "low",
@@ -105,6 +113,7 @@ export function loadPracticePlan(): PracticePlan {
           ? parsed.allowAiWhiteboardAnnotations
           : defaultPracticePlan.allowAiWhiteboardAnnotations,
       liveApis: parseLiveApis(parsed.liveApis),
+      plannerApi: parsePlannerApi(parsed.plannerApi),
       directorSettings: parseDirectorSettings(parsed.directorSettings),
       plannedQuestions: parsePlannedQuestions(parsed.plannedQuestions),
     };
@@ -157,6 +166,15 @@ function parseLiveApis(value: unknown): Record<VoiceProviderId, LiveApiSettings>
       apiKey: stored.google?.apiKey ?? "",
       model: stored.google?.model?.trim() || defaultPracticePlan.liveApis.google.model,
     },
+  };
+}
+
+function parsePlannerApi(value: unknown): PlannerApiSettings {
+  const stored = (value ?? {}) as Partial<PlannerApiSettings>;
+  return {
+    apiKey: stored.apiKey ?? "",
+    endpoint: stored.endpoint?.trim() ?? "",
+    model: stored.model?.trim() ?? "",
   };
 }
 

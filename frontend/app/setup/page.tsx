@@ -71,6 +71,11 @@ export default function SetupPage() {
           practice_topics: plan.topics,
           question_bank: plan.questionBank,
           total_duration_seconds: plan.directorSettings.totalDurationMinutes * 60,
+          planner: {
+            api_key: plan.plannerApi.apiKey,
+            endpoint: plan.plannerApi.endpoint,
+            model: plan.plannerApi.model,
+          },
         }),
       });
       if (!response.ok) throw new Error("Planning failed");

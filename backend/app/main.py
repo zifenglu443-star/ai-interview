@@ -9,7 +9,7 @@ from threading import Lock
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 from uuid import uuid4
 
 import httpx
@@ -100,9 +100,10 @@ def build_interview_plan(
     request: "PlanInterviewRequest",
 ) -> tuple[tuple[InterviewQuestion, ...], Literal["provider", "fallback"]]:
     """Use the configured planning provider, with a deterministic local fallback."""
-    api_key = os.environ.get("PLANNER_API_KEY") or os.environ.get("DEEPSEEK_API_KEY", "")
-    model = os.environ.get("PLANNER_MODEL") or os.environ.get("DEEPSEEK_PLANNER_MODEL", "deepseek-v4-flash")
-    endpoint = os.environ.get("PLANNER_API_ENDPOINT", "https://api.deepseek.com/chat/completions")
+    browser_planner = request.planner
+    api_key = browser_planner.api_key or os.environ.get("PLANNER_API_KEY") or os.environ.get("DEEPSEEK_API_KEY", "")
+    model = browser_planner.model or os.environ.get("PLANNER_MODEL") or os.environ.get("DEEPSEEK_PLANNER_MODEL", "deepseek-v4-flash")
+    endpoint = browser_planner.endpoint or os.environ.get("PLANNER_API_ENDPOINT", "https://api.deepseek.com/chat/completions")
     source_questions = [line.strip().lstrip("-•0123456789. ") for line in request.question_bank.splitlines() if line.strip()]
     source = "\n".join(f"- {question}" for question in source_questions) or request.practice_topics or "Choose appropriate interview questions."
     if api_key:
@@ -249,6 +250,25 @@ class PlanInterviewRequest(BaseModel):
     practice_topics: str = Field(default="", max_length=1200)
     question_bank: str = Field(default="", max_length=20_000)
     total_duration_seconds: int = Field(default=900, ge=300, le=3600)
+    planner: "PlannerApiSettingsModel" = Field(default_factory=lambda: PlannerApiSettingsModel())
+
+
+class PlannerApiSettingsModel(BaseModel):
+    api_key: str = Field(default="", max_length=500)
+    endpoint: str = Field(default="", max_length=1_000)
+    model: str = Field(default="", max_length=160)
+
+    def model_post_init(self, __context: object) -> None:
+        if not self.endpoint:
+            return
+        parsed = urlparse(self.endpoint)
+        if (
+            parsed.scheme != "https"
+            or not parsed.netloc
+            or parsed.username is not None
+            or parsed.password is not None
+        ):
+            raise ValueError("Planning endpoint must be a valid HTTPS URL.")
 
 
 class InterviewPlanResponse(BaseModel):
@@ -479,7 +499,8 @@ def plan_interview(request: PlanInterviewRequest) -> InterviewPlanResponse:
     questions, source = build_interview_plan(request)
     return InterviewPlanResponse(
         provider=source,
-        model=os.environ.get("PLANNER_MODEL")
+        model=request.planner.model
+        or os.environ.get("PLANNER_MODEL")
         or os.environ.get("DEEPSEEK_PLANNER_MODEL", "deepseek-v4-flash"),
         total_duration_seconds=request.total_duration_seconds,
         questions=[

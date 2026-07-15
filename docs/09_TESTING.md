@@ -23,6 +23,8 @@ This covers:
 2. Confirm the browser opens `http://127.0.0.1:3001/setup`.
 3. Enter role/topics and duration, generate a plan, then change one input and
    confirm the stale preview clears.
+   Configure the optional Planning text model in Settings first and confirm the
+   plan preview reports the configured provider when its API is available.
 4. Generate again, enter the waiting room, and click Start interview.
 5. Confirm Start becomes End interview.
 6. Confirm the exact current question is visible above Answer notes.

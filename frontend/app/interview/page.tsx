@@ -529,6 +529,11 @@ export default function InterviewPage() {
             practice_topics: currentPracticePlan.topics,
             question_bank: currentPracticePlan.questionBank,
             total_duration_seconds: currentPracticePlan.directorSettings.totalDurationMinutes * 60,
+            planner: {
+              api_key: currentPracticePlan.plannerApi.apiKey,
+              endpoint: currentPracticePlan.plannerApi.endpoint,
+              model: currentPracticePlan.plannerApi.model,
+            },
           },
         );
         currentPracticePlan = { ...currentPracticePlan, plannedQuestions: generated.questions };
