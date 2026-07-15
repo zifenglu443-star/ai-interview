@@ -67,11 +67,6 @@ sessions: dict[str, DirectorSession] = {}
 session_last_seen: dict[str, float] = {}
 sessions_lock = Lock()
 SESSION_TTL_SECONDS = 6 * 60 * 60
-NUMBERED_QUESTION_START = re.compile(
-    r"^\s*(?:\d+|[一二三四五六七八九十]+)\s*[.)、:：]\s*(.+?)\s*$"
-)
-
-
 class PlanningError(Exception):
     """A visible failure from the required text-planning provider."""
 
@@ -92,67 +87,6 @@ def prune_expired_sessions_locked(now: float) -> None:
         session_last_seen.pop(session_id, None)
 
 
-def is_numbered_question_set(material: str) -> bool:
-    """Return whether material explicitly contains separately numbered questions."""
-    return sum(
-        bool(NUMBERED_QUESTION_START.match(line))
-        for line in material.splitlines()
-        if line.strip()
-    ) >= 2
-
-
-def split_question_material(material: str) -> list[str]:
-    """Preserve numbered question boundaries and their wrapped formula/text lines."""
-    lines = material.replace("\r\n", "\n").replace("\r", "\n").split("\n")
-    numbered = is_numbered_question_set(material)
-
-    if numbered:
-        questions: list[list[str]] = []
-        current: list[str] = []
-        for raw_line in lines:
-            match = NUMBERED_QUESTION_START.match(raw_line)
-            if match:
-                if current:
-                    questions.append(current)
-                current = [match.group(1)]
-            elif current and raw_line.strip():
-                # A formula or wrapped paragraph belongs to the latest numbered item.
-                current.append(raw_line.strip())
-        if current:
-            questions.append(current)
-        return ["\n".join(question).strip() for question in questions if question]
-
-    # Maintain the existing import behaviour: a non-numbered file can still use
-    # one question per physical line. Blank-separated paragraphs are kept intact.
-    paragraphs = [
-        [line.strip() for line in paragraph.splitlines() if line.strip()]
-        for paragraph in re.split(r"\n\s*\n", material.strip())
-        if paragraph.strip()
-    ]
-    if len(paragraphs) > 1:
-        return ["\n".join(paragraph).strip() for paragraph in paragraphs]
-    return [line.strip() for line in lines if line.strip()]
-
-
-def normalize_question_text(value: str) -> str:
-    """Compare question text while allowing only whitespace normalization."""
-    return re.sub(r"\s+", " ", value).strip().casefold()
-
-
-def build_question_plan_from_bank(question_bank: str) -> tuple[InterviewQuestion, ...]:
-    """Turn explicit question material into a locked session plan without merging items."""
-    prompts = split_question_material(question_bank)
-    return tuple(
-        InterviewQuestion(
-            id=f"bank-{index + 1}",
-            prompt=prompt,
-            focus="Imported question",
-            follow_up_prompt="Give one concrete example, tradeoff, or measurable result.",
-        )
-        for index, prompt in enumerate(prompts[:20])
-    )
-
-
 def build_interview_plan(
     request: "PlanInterviewRequest",
 ) -> tuple[tuple[InterviewQuestion, ...], Literal["provider"]]:
@@ -162,20 +96,16 @@ def build_interview_plan(
     model = browser_planner.model or os.environ.get("PLANNER_MODEL") or os.environ.get("DEEPSEEK_PLANNER_MODEL", "deepseek-v4-flash")
     endpoint = browser_planner.endpoint or os.environ.get("PLANNER_API_ENDPOINT", "https://api.deepseek.com/chat/completions")
     source = request.question_bank.strip() or request.practice_topics.strip() or "Choose appropriate interview questions."
-    numbered_source_questions = (
-        split_question_material(source) if is_numbered_question_set(source) else []
-    )
     if not api_key:
         raise PlanningError("Planning API key is not configured. Add it in Settings or .env.")
     prompt = (
         "Return JSON only with {\"questions\":[{\"id\":string,\"prompt\":string,\"focus\":string,"
         "\"follow_up_prompt\":string,\"allocated_seconds\":integer}]}. Build an interview plan from the "
-        "provided questions/topics. The material may contain multiple numbered questions. If it contains "
-        "N numbered or separately delimited questions, return exactly N question objects in the same order. "
-        "Every prompt must contain exactly one independently answerable original question, including its "
-        "continuation lines and formulae. Never merge separate questions, split one question into several "
-        "objects, add generic opening/behavioural/closing questions, or prepend wording such as 'Explain'. "
-        "Preserve supplied wording except for harmless whitespace. "
+        "provided questions/topics. Read the entire source yourself and decide the independent question "
+        "boundaries; numbering, line breaks, and formatting are only hints, not a protocol. Return the right "
+        "number of questions in the same logical order as the source. Each output question must stay broadly "
+        "faithful to its corresponding supplied material; you may clarify, scope, or rephrase it for an "
+        "interview, but never introduce an unrelated generic opening, behavioural, or closing question. "
         "If the source is a list of topic fragments rather than complete questions, create one concrete, "
         "independently answerable interview question for each supplied topic, in source order, then allocate time. "
         "Allocate the entire time budget across 1-20 questions. This is a flexible reference budget, not a rigid schedule: allow "
@@ -218,23 +148,10 @@ def build_interview_plan(
             for index, item in enumerate(payload.get("questions", [])[:20])
             if str(item.get("prompt", "")).strip()
         )
-        preserves_numbered_source = not numbered_source_questions or (
-            len(questions) == len(numbered_source_questions)
-            and all(
-                normalize_question_text(question.prompt)
-                == normalize_question_text(source_question)
-                for question, source_question in zip(questions, numbered_source_questions)
-            )
-        )
         if not questions:
             raise PlanningError("Planning API returned no questions.", status_code=502)
         if len({question.id for question in questions}) != len(questions):
             raise PlanningError("Planning API returned duplicate question IDs.", status_code=502)
-        if not preserves_numbered_source:
-            raise PlanningError(
-                "Planning API changed or merged the numbered questions. Please generate again.",
-                status_code=502,
-            )
         return normalize_plan_allocations(questions, request.total_duration_seconds), "provider"
     except httpx.HTTPStatusError as error:
         if error.response.status_code == 401:

@@ -105,7 +105,7 @@ def test_plan_api_requires_a_configured_text_model(monkeypatch) -> None:
     assert response.json()["detail"] == "Planning API key is not configured. Add it in Settings or .env."
 
 
-def test_plan_provider_keeps_numbered_multiline_topics_as_separate_questions(monkeypatch) -> None:
+def test_plan_provider_owns_question_boundaries_and_keeps_returned_order(monkeypatch) -> None:
     topics = """1. Consider the function
 f(x)=x^3-3x. Find the values of k for which f(x)=k has three distinct real solutions.
 2. A fair coin is tossed until two consecutive heads appear. Find the expected toss count.
@@ -117,9 +117,9 @@ f(x)=x^3-3x. Find the values of k for which f(x)=k has three distinct real solut
 
         def json(self) -> dict[str, object]:
             return {"choices": [{"message": {"content": json.dumps({"questions": [
-                {"id": "one", "prompt": "Consider the function\nf(x)=x^3-3x. Find the values of k for which f(x)=k has three distinct real solutions."},
-                {"id": "two", "prompt": "A fair coin is tossed until two consecutive heads appear. Find the expected toss count."},
-                {"id": "three", "prompt": "Without a calculator, determine which is larger: 2^(100) or 3^(60)."},
+                {"id": "one", "prompt": "Rewritten first question."},
+                {"id": "two", "prompt": "Rewritten second question."},
+                {"id": "three", "prompt": "Rewritten third question."},
             ]})}}]}
 
     monkeypatch.setattr(main.httpx, "post", lambda *_args, **_kwargs: FakeResponse())
@@ -132,9 +132,9 @@ f(x)=x^3-3x. Find the values of k for which f(x)=k has three distinct real solut
     payload = response.json()
     assert payload["provider"] == "provider"
     assert [question["prompt"] for question in payload["questions"]] == [
-        "Consider the function\nf(x)=x^3-3x. Find the values of k for which f(x)=k has three distinct real solutions.",
-        "A fair coin is tossed until two consecutive heads appear. Find the expected toss count.",
-        "Without a calculator, determine which is larger: 2^(100) or 3^(60).",
+        "Rewritten first question.",
+        "Rewritten second question.",
+        "Rewritten third question.",
     ]
     assert sum(question["allocated_seconds"] for question in payload["questions"]) == 900
 
@@ -149,45 +149,6 @@ def test_start_requires_a_generated_plan_for_supplied_topics() -> None:
 
     assert response.status_code == 422
     assert response.json()["detail"] == "Generate a text-model interview plan before starting this interview."
-
-
-def test_plan_rejects_provider_output_that_merges_numbered_questions(monkeypatch) -> None:
-    class FakeResponse:
-        def raise_for_status(self) -> None:
-            return None
-
-        def json(self) -> dict[str, object]:
-            return {
-                "choices": [
-                    {
-                        "message": {
-                            "content": json.dumps(
-                                {
-                                    "questions": [
-                                        {
-                                            "id": "merged",
-                                            "prompt": "Explain all supplied questions.",
-                                            "allocated_seconds": 600,
-                                        }
-                                    ]
-                                }
-                            )
-                        }
-                    }
-                ]
-            }
-
-    monkeypatch.setattr(main.httpx, "post", lambda *_args, **_kwargs: FakeResponse())
-    response = client.post(
-        "/interview/plan",
-        json={
-            "practice_topics": "1. First independent problem.\n2. Second independent problem.",
-            "planner": {"api_key": "browser-key", "endpoint": "https://planner.example/v1", "model": "test"},
-        },
-    )
-
-    assert response.status_code == 502
-    assert "changed or merged" in response.json()["detail"]
 
 
 def test_plan_api_accepts_browser_planner_settings(monkeypatch) -> None:
@@ -250,8 +211,8 @@ def test_plan_api_accepts_browser_planner_settings(monkeypatch) -> None:
         "Content-Type": "application/json",
     }
     prompt = captured["json"]["messages"][1]["content"]  # type: ignore[index]
-    assert "return exactly N question objects" in prompt
-    assert "Never merge separate questions" in prompt
+    assert "decide the independent question boundaries" in prompt
+    assert "same logical order as the source" in prompt
     assert "one concrete, independently answerable interview question for each supplied topic" in prompt
 
 
