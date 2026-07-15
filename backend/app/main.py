@@ -45,10 +45,6 @@ GOOGLE_LIVE_ENDPOINT = (
     "wss://generativelanguage.googleapis.com/ws/"
     "google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent"
 )
-GOOGLE_LIVE_EPHEMERAL_ENDPOINT = (
-    "wss://generativelanguage.googleapis.com/ws/"
-    "google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContentConstrained"
-)
 
 app = FastAPI(
     title="AI Interview Simulator API",
@@ -1053,14 +1049,10 @@ async def google_live_proxy(
         "GOOGLE_LIVE_MODEL",
         "gemini-3.1-flash-live-preview",
     )
-    # Gemini ephemeral tokens use the documented AQ.* form and must use the
-    # v1alpha constrained endpoint with access_token, not the normal API-key URL.
-    if api_key.startswith("AQ."):
-        google_url = (
-            f"{GOOGLE_LIVE_EPHEMERAL_ENDPOINT}?access_token={quote(api_key, safe='')}"
-        )
-    else:
-        google_url = f"{GOOGLE_LIVE_ENDPOINT}?key={quote(api_key, safe='')}"
+    # AI Studio keys may use more than one prefix. Treat this configured value
+    # as the normal documented Gemini API key; ephemeral tokens require a
+    # separately-issued access-token flow and are not accepted in this setting.
+    google_url = f"{GOOGLE_LIVE_ENDPOINT}?key={quote(api_key, safe='')}"
 
     try:
         async with websockets.connect(
@@ -1100,8 +1092,7 @@ async def google_live_proxy(
         upstream_message = str(error).lower()
         if "auth token" in upstream_message or "authentication" in upstream_message:
             message = (
-                "Gemini Live authentication failed. Use a valid Google AI Studio API key "
-                "or a fresh Gemini ephemeral token."
+                "Gemini Live authentication failed. Check the Google AI Studio API key."
             )
         else:
             message = "Gemini Live connection failed."
