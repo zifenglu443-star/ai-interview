@@ -16,6 +16,8 @@ This covers:
 - report scoring;
 - frontend lifecycle rules, telemetry ordering, speaking duration, and Director mapping.
 - validated voice progression and normalized whiteboard annotation contracts.
+- one-to-one planning-source coverage, exact numbered-question wording, and
+  rejection of merged or reordered planning-provider output.
 
 ## Manual lifecycle acceptance
 

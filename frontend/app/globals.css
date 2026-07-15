@@ -459,6 +459,7 @@ p {
   background: #050608;
   border: 1px solid #252a34;
   border-radius: 8px;
+  height: 100%;
   min-height: 0;
   overflow: hidden;
   position: relative;
@@ -468,7 +469,7 @@ p {
   display: grid;
   gap: 16px;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  grid-template-rows: minmax(0, 1fr) minmax(174px, 0.38fr);
+  grid-template-rows: minmax(0, 1fr) minmax(220px, 0.45fr);
   height: 100%;
   min-height: 0;
   padding: 16px;
@@ -696,6 +697,9 @@ p {
   box-shadow: 0 14px 36px rgb(0 0 0 / 22%);
   display: grid;
   gap: 10px;
+  grid-template-rows: auto auto minmax(64px, 1fr) auto;
+  min-height: 0;
+  overflow-y: auto;
   padding: 14px;
   position: relative;
   width: 100%;
@@ -717,6 +721,8 @@ p {
   font-weight: 700;
   line-height: 1.45;
   margin: 0;
+  max-height: 2.9em;
+  overflow-y: auto;
 }
 
 .stage-answer-panel textarea {
@@ -724,9 +730,10 @@ p {
   border: 1px solid #343b49;
   border-radius: 8px;
   color: #f8fafc;
-  min-height: 88px;
+  height: 100%;
+  min-height: 64px;
   padding: 11px 12px;
-  resize: vertical;
+  resize: none;
   width: 100%;
 }
 

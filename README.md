@@ -1,118 +1,100 @@
 # AI Interview Simulator
 
-An immersive local mock-interview app for students. The product is a meeting
-experience, not a chatbot: the Python Director owns the interview lifecycle,
-voice models perform the conversation, and the frontend renders the room.
+本地运行的 AI 模拟面试软件。它提供面试准备、候场、实时语音面试、共享白板、反馈报告和历史记录；数据保存在本机，服务只监听 `127.0.0.1`。
 
-## One supported local workflow
+![面试设置页](docs/audit-screenshots/01-setup.png)
 
-Double-click [Start AI Interview Simulator.command](<./Start AI Interview Simulator.command>).
+## 直接使用
 
-The launcher always:
+### 方式一：下载 App 发布包
 
-1. reuses an already healthy local frontend/backend pair when it matches the
-   current Git revision, so opening the app again does not destroy an active
-   in-memory interview;
-2. otherwise stops partial or stale services on ports `3001` and `8000`;
-3. starts FastAPI with the project `.venv`;
-4. creates a fresh production frontend build;
-5. starts Next.js on `http://127.0.0.1:3001`;
-6. opens `http://127.0.0.1:3001/setup` only after both services respond.
+1. 在 GitHub 仓库右侧打开 **Releases**，下载最新的 `AI-Interview-Simulator-GitHub.zip`。
+2. 解压 ZIP，不要只把 `.app` 单独移出文件夹。
+3. 双击 **AI Interview Simulator.app**。
+4. 如果 macOS 第一次阻止打开，请右键 App → **打开** → 再次确认 **打开**。
 
-After a committed app update, the next launcher run deliberately rebuilds and
-restarts the frontend so the browser cannot keep serving an older interface.
+### 方式二：一键打开源码包
 
-Runtime logs are written to `.runtime-logs/` and are ignored by Git.
+下载并解压仓库后，双击 **Start AI Interview Simulator.command**。第一次启动会自动创建本地配置、安装依赖并构建软件，耗时取决于网络速度；之后启动会快很多。
 
-## First-time setup
+### Windows 一键打开
+
+下载并解压同一个 ZIP，双击 **Start AI Interview Simulator.bat**。请保留完整文件夹，不要单独移动启动文件。Windows 第一次启动也会自动安装依赖、构建软件并打开浏览器。
+
+运行要求：
+
+- macOS 12+ 或 Windows 10/11
+- [Node.js 20.9+](https://nodejs.org/)（建议当前 LTS）
+- [Python 3.10+](https://www.python.org/downloads/)
+- 首次安装依赖时需要网络
+
+> macOS App 是轻量启动器，必须和解压后的项目文件放在一起。当前版本不是签名公证的独立安装包。Windows 使用一键 `.bat` 启动器。
+
+## 配置与操作
+
+1. 打开软件后进入 **Settings**。
+2. 至少配置一个实时语音服务：OpenAI Realtime 或 Google Gemini Live 的 API Key 与模型名。
+3. 如需自动生成面试计划，再填写 Planning text model 的 HTTPS Endpoint、API Key 和模型名。
+4. 返回 **Setup**，选择岗位、面试重点、时长和难度；可以粘贴题目或主题。
+5. 生成计划后进入候场室，检查摄像头、麦克风，再开始面试。
+6. 面试中可使用语音、文字回答和共享白板；结束后在报告页查看反馈并导出 PDF。
+
+也可以复制 `.env.example` 为 `.env`，在其中配置服务端密钥。`.env` 已被 Git 忽略，严禁把真实密钥上传到 GitHub。
+
+## 软件包含什么
+
+- `frontend/`：Next.js 面试界面、语音客户端和白板
+- `backend/`：FastAPI 接口及模型服务连接
+- `director/`：确定性的面试流程与控制规则
+- `reporting/`：报告与评分逻辑
+- `tests/`：后端、流程、报告和前端单元测试
+- `docs/`：产品、架构、界面和验收说明
+
+当前界面使用本地图片和短视频呈现面试官，不含 3D 模型或 WebGL 渲染器。发布 ZIP 不包含依赖缓存、构建结果、API 密钥、运行日志、历史面试记录或素材参考图。
+
+## 手动开发
+
+首次安装：
 
 ```bash
 cp .env.example .env
-npm --prefix frontend install
 python3 -m venv .venv
 .venv/bin/python -m pip install -r backend/requirements.txt
+npm --prefix frontend ci
 ```
 
-Add at least one voice key to `.env`: `GOOGLE_API_KEY` or `OPENAI_API_KEY`.
-Use `frontend/package-lock.json` when installing frontend dependencies; the root
-package provides repository-wide scripts and workspace routing.
-
-## Manual development
-
-Use two terminals:
+分别启动两个服务：
 
 ```bash
 npm run dev:backend
 npm run dev:frontend
 ```
 
-Both development and production use the same addresses:
+- 前端：<http://127.0.0.1:3001>
+- 后端：<http://127.0.0.1:8000>
+- 健康检查：<http://127.0.0.1:8000/health>
 
-- Frontend: `http://127.0.0.1:3001`
-- Backend: `http://127.0.0.1:8000`
-- Backend health: `http://127.0.0.1:8000/health`
-
-## Product flow
-
-```text
-Setup + plan preview → Waiting room → Interview + whiteboard → Report → History
-```
-
-- Setup chooses role, focus, reference duration, voice model, and Director profile.
-- Settings also contains a provider-neutral Planning text model section. Its
-  browser-stored HTTPS endpoint, API key, and model override the corresponding
-  `.env` planner values for plan-generation requests only.
-- The planning provider builds a difficulty-weighted question plan. Editing role,
-  focus, topics, uploaded questions, or duration invalidates the old preview.
-- Planning is model-required: a planning API failure is shown clearly and never
-  replaced by locally invented questions. Numbered input (`1.`, `2.`, `3.`)
-  keeps each item, including wrapped prose and formula lines, as one question.
-- The selected model and Director profile are locked for the session and only
-  displayed in the room.
-- Start creates a Director session; the button then becomes End interview.
-- The current question is visible in the room and is also placed at the top of
-  the shared whiteboard. Opening the board late still restores the current question.
-- Answer notes is a private scratchpad and typed-answer fallback. It is editable
-  during the session; submitting it advances the Director.
-- Gemini Live can propose a bounded follow-up or `move_on`. The backend Director
-  validates the proposal, records the voice answer, advances the real question
-  index, and returns the actual progress to the interviewer.
-- Whiteboard annotations use normalized image coordinates and are accepted only
-  after backend validation. Candidate content is never deleted automatically,
-  and Setup can disable automatic AI annotations without hiding the question.
-- End stops camera and voice, stores the local report, and enables View report.
-  If permanent archive writing fails, the ended room keeps a retry action while
-  the browser copy remains available.
-- Every completed or manually ended interview is also archived in
-  `data/interview_records/`. Each archive contains the report, the submitted
-  answers and voice transcript, stable evaluation, `plan.json`, and a
-  `whiteboard.jpg` snapshot when a shared whiteboard is available.
-- After an interview is archived, the app opens its feedback page automatically.
-  The home page links to all saved reports, and each report can be exported via
-  the browser's Save as PDF flow. History also supports an explicit two-step
-  deletion of the complete local record.
-
-## Repository map
-
-- `frontend/`: Next.js interface, state-driven interviewer video, voice clients,
-  whiteboard, and bounded telemetry.
-- `backend/`: FastAPI endpoints and protected provider integrations.
-- `director/`: deterministic interview lifecycle and control validation.
-- `reporting/`: deterministic report scoring.
-- `tests/`: backend, Director, reporting, and telemetry tests.
-- `docs/`: current product, architecture, UX, testing, and interviewer plans.
-
-There is no database or authentication in the current local product. Session
-setup, browser-entered API keys, whiteboard state, and the latest report are
-local-browser data; the active Director session is held in backend memory and
-ends if the backend restarts. Completed interviews are additionally written to
-`data/interview_records/`. Keep both services bound to `127.0.0.1`; this build
-is not approved for public deployment.
-
-## Verification
+完整验证：
 
 ```bash
 npm run verify
 ```
 
-See [docs/09_TESTING.md](docs/09_TESTING.md) for manual acceptance checks.
+手工验收清单见 [docs/09_TESTING.md](docs/09_TESTING.md)，架构说明见 [docs/02_TECH_ARCHITECTURE.md](docs/02_TECH_ARCHITECTURE.md)。
+
+## 上传 GitHub
+
+解压发布 ZIP 后，可直接把文件上传到新仓库；更推荐使用 Git：
+
+```bash
+git init
+git add .
+git commit -m "Initial release"
+git branch -M main
+git remote add origin https://github.com/YOUR_NAME/YOUR_REPO.git
+git push -u origin main
+```
+
+不要上传 `.env`、`.venv`、`node_modules`、`.next`、`.runtime-logs` 或 `data/interview_records`。如需给普通用户直接下载，把生成的 `AI-Interview-Simulator-GitHub.zip` 上传到 GitHub **Releases**。
+
+维护者可运行 `./scripts/build-release.sh`，重新生成干净的发布 ZIP 和 SHA-256 校验文件。

@@ -9,3 +9,5 @@ data/interview_records/
 .DS_Store
 *.log
 *.tsbuildinfo
+*.zip
+dist/

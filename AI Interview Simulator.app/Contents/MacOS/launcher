@@ -1,0 +1,12 @@
+#!/bin/zsh
+
+APP_DIR="${0:A:h:h:h}"
+PROJECT_DIR="${APP_DIR:h}"
+LAUNCHER="$PROJECT_DIR/Start AI Interview Simulator.command"
+
+if [[ ! -x "$LAUNCHER" ]]; then
+  /usr/bin/osascript -e 'display alert "AI Interview Simulator" message "App 必须和完整的项目文件夹放在一起。请重新解压下载的 ZIP。" as critical'
+  exit 1
+fi
+
+/usr/bin/open -a Terminal "$LAUNCHER"

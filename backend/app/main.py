@@ -5,9 +5,10 @@ import os
 import re
 import shutil
 import time
-from threading import Lock
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from threading import Lock
 from typing import Any, Literal
 from urllib.parse import quote, urlparse
 from uuid import uuid4
@@ -67,6 +68,11 @@ sessions: dict[str, DirectorSession] = {}
 session_last_seen: dict[str, float] = {}
 sessions_lock = Lock()
 SESSION_TTL_SECONDS = 6 * 60 * 60
+NUMBERED_QUESTION_START = re.compile(
+    r"^\s*(?:\d+|[一二三四五六七八九十百]+)\s*[.)、:：]\s*(.*?)\s*$"
+)
+
+
 class PlanningError(Exception):
     """A visible failure from the required text-planning provider."""
 
@@ -87,6 +93,93 @@ def prune_expired_sessions_locked(now: float) -> None:
         session_last_seen.pop(session_id, None)
 
 
+@dataclass(frozen=True)
+class PlanningSourceItem:
+    source_id: str
+    text: str
+    kind: Literal["question", "topic"]
+
+
+def split_numbered_questions(material: str) -> tuple[str, ...]:
+    """Group numbered questions with all non-empty continuation lines."""
+    lines = material.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    if not any(NUMBERED_QUESTION_START.match(line) for line in lines):
+        return ()
+
+    questions: list[list[str]] = []
+    current: list[str] | None = None
+    for raw_line in lines:
+        match = NUMBERED_QUESTION_START.match(raw_line)
+        if match:
+            if current is not None:
+                questions.append(current)
+            current = [match.group(1).strip()] if match.group(1).strip() else []
+        elif current is not None and raw_line.strip():
+            current.append(raw_line.strip())
+    if current is not None:
+        questions.append(current)
+    return tuple("\n".join(question).strip() for question in questions)
+
+
+def split_question_material(material: str) -> tuple[str, ...]:
+    """Apply the documented numbered, paragraph, then physical-line boundaries."""
+    numbered = split_numbered_questions(material)
+    if numbered:
+        return numbered
+
+    normalized = material.replace("\r\n", "\n").replace("\r", "\n").strip()
+    paragraphs = tuple(
+        "\n".join(line.strip() for line in paragraph.splitlines() if line.strip())
+        for paragraph in re.split(r"\n\s*\n", normalized)
+        if paragraph.strip()
+    )
+    if len(paragraphs) > 1:
+        return paragraphs
+    return tuple(line.strip() for line in normalized.splitlines() if line.strip())
+
+
+def build_planning_source_items(
+    request: "PlanInterviewRequest",
+) -> tuple[PlanningSourceItem, ...]:
+    """Create stable source items that the provider must cover one-for-one."""
+    if request.question_bank.strip():
+        texts = split_question_material(request.question_bank)
+        kind: Literal["question", "topic"] = "question"
+    elif request.practice_topics.strip():
+        numbered = split_numbered_questions(request.practice_topics)
+        texts = numbered or tuple(
+            line.strip()
+            for line in request.practice_topics.replace("\r\n", "\n")
+            .replace("\r", "\n")
+            .splitlines()
+            if line.strip()
+        )
+        kind = "question" if numbered else "topic"
+    else:
+        texts = ("Choose appropriate interview questions.",)
+        kind = "topic"
+
+    if len(texts) > 20:
+        raise PlanningError(
+            "Source material contains more than 20 questions or topics.",
+            status_code=422,
+        )
+    if any(not text for text in texts):
+        raise PlanningError(
+            "Numbered questions cannot be empty.",
+            status_code=422,
+        )
+    if any(len(text) > 2_000 for text in texts):
+        raise PlanningError(
+            "Each source question or topic must be 2,000 characters or fewer.",
+            status_code=422,
+        )
+    return tuple(
+        PlanningSourceItem(source_id=f"source-{index + 1}", text=text, kind=kind)
+        for index, text in enumerate(texts)
+    )
+
+
 def build_interview_plan(
     request: "PlanInterviewRequest",
 ) -> tuple[tuple[InterviewQuestion, ...], Literal["provider"]]:
@@ -95,19 +188,17 @@ def build_interview_plan(
     api_key = browser_planner.api_key or os.environ.get("PLANNER_API_KEY") or os.environ.get("DEEPSEEK_API_KEY", "")
     model = browser_planner.model or os.environ.get("PLANNER_MODEL") or os.environ.get("DEEPSEEK_PLANNER_MODEL", "deepseek-v4-flash")
     endpoint = browser_planner.endpoint or os.environ.get("PLANNER_API_ENDPOINT", "https://api.deepseek.com/chat/completions")
-    source = request.question_bank.strip() or request.practice_topics.strip() or "Choose appropriate interview questions."
+    source_items = build_planning_source_items(request)
     if not api_key:
         raise PlanningError("Planning API key is not configured. Add it in Settings or .env.")
     prompt = (
-        "Return JSON only with {\"questions\":[{\"id\":string,\"prompt\":string,\"focus\":string,"
+        "Return JSON only with {\"questions\":[{\"source_id\":string,\"id\":string,\"prompt\":string,\"focus\":string,"
         "\"follow_up_prompt\":string,\"allocated_seconds\":integer}]}. Build an interview plan from the "
-        "provided questions/topics. Read the entire source yourself and decide the independent question "
-        "boundaries; numbering, line breaks, and formatting are only hints, not a protocol. Return the right "
-        "number of questions in the same logical order as the source. Each output question must stay broadly "
-        "faithful to its corresponding supplied material; you may clarify, scope, or rephrase it for an "
-        "interview, but never introduce an unrelated generic opening, behavioural, or closing question. "
-        "If the source is a list of topic fragments rather than complete questions, create one concrete, "
-        "independently answerable interview question for each supplied topic, in source order, then allocate time. "
+        "provided source_items. Return exactly one question for every source_item, copy its source_id, and keep "
+        "the array in the same order. Never merge, omit, duplicate, or reorder source items. For kind=question, "
+        "copy the supplied text into prompt without changing its wording. For kind=topic, create one concrete, "
+        "independently answerable and directly relevant interview question. Never add an unrelated generic "
+        "opening, behavioural, or closing question. "
         "Allocate the entire time budget across 1-20 questions. This is a flexible reference budget, not a rigid schedule: allow "
         "reasonable variance and leave room to shorten or skip lower-value questions. Do not distribute "
         "time evenly. Give more time to questions with greater conceptual difficulty, implementation or "
@@ -115,7 +206,8 @@ def build_interview_plan(
         "give less time to introductory or verification questions. Prioritize independent problem completion "
         "and depth of reasoning over getting a final answer exactly right. "
         f"Role: {request.target_role or 'general'}. Focus: {request.practice_focus}. "
-        f"Total seconds: {request.total_duration_seconds}. Source material (preserve boundaries exactly):\n---\n{source}\n---"
+        f"Total seconds: {request.total_duration_seconds}. Source items JSON:\n"
+        f"{json.dumps([{'source_id': item.source_id, 'kind': item.kind, 'text': item.text} for item in source_items], ensure_ascii=False)}"
     )
     try:
         response = httpx.post(
@@ -136,20 +228,56 @@ def build_interview_plan(
         )
         response.raise_for_status()
         content = response.json()["choices"][0]["message"]["content"]
+        if not isinstance(content, str):
+            raise PlanningError("Planning API returned an invalid plan response.", status_code=502)
         payload = json.loads(re.sub(r"^```(?:json)?|```$", "", content.strip()).strip())
-        questions = tuple(
-            InterviewQuestion(
-                    id=str(item.get("id") or f"plan-{index + 1}").strip(),
-                    prompt=str(item["prompt"]).strip(),
-                    focus=str(item.get("focus") or "Interview question").strip(),
-                    follow_up_prompt=str(item.get("follow_up_prompt") or "What assumption or tradeoff mattered most?").strip(),
-                    allocated_seconds=max(30, int(item.get("allocated_seconds") or 0)),
+        if not isinstance(payload, dict) or not isinstance(payload.get("questions"), list):
+            raise PlanningError("Planning API returned an invalid plan response.", status_code=502)
+        raw_questions = payload["questions"]
+        if len(raw_questions) != len(source_items) or not all(
+            isinstance(item, dict) for item in raw_questions
+        ):
+            raise PlanningError(
+                "Planning API merged, omitted, or added source questions. Please generate again.",
+                status_code=502,
             )
-            for index, item in enumerate(payload.get("questions", [])[:20])
-            if str(item.get("prompt", "")).strip()
-        )
-        if not questions:
-            raise PlanningError("Planning API returned no questions.", status_code=502)
+        returned_source_ids = [
+            str(item.get("source_id") or "").strip() for item in raw_questions
+        ]
+        expected_source_ids = [item.source_id for item in source_items]
+        if returned_source_ids != expected_source_ids:
+            raise PlanningError(
+                "Planning API duplicated or reordered source questions. Please generate again.",
+                status_code=502,
+            )
+
+        questions_list: list[InterviewQuestion] = []
+        for index, (item, source_item) in enumerate(zip(raw_questions, source_items)):
+            returned_prompt = item.get("prompt")
+            if not isinstance(returned_prompt, str) or not returned_prompt.strip():
+                raise PlanningError("Planning API returned an invalid plan response.", status_code=502)
+            question = InterviewQuestion(
+                id=str(item.get("id") or f"plan-{index + 1}").strip(),
+                prompt=(source_item.text if source_item.kind == "question" else returned_prompt.strip()),
+                focus=str(item.get("focus") or "Interview question").strip(),
+                follow_up_prompt=str(
+                    item.get("follow_up_prompt")
+                    or "What assumption or tradeoff mattered most?"
+                ).strip(),
+                allocated_seconds=max(30, int(item.get("allocated_seconds") or 0)),
+            )
+            if (
+                not question.id
+                or len(question.id) > 120
+                or len(question.prompt) > 2_000
+                or not question.focus
+                or len(question.focus) > 200
+                or not question.follow_up_prompt
+                or len(question.follow_up_prompt) > 2_000
+            ):
+                raise PlanningError("Planning API returned an invalid plan response.", status_code=502)
+            questions_list.append(question)
+        questions = tuple(questions_list)
         if len({question.id for question in questions}) != len(questions):
             raise PlanningError("Planning API returned duplicate question IDs.", status_code=502)
         return normalize_plan_allocations(questions, request.total_duration_seconds), "provider"

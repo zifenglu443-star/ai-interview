@@ -40,7 +40,7 @@ export type PlannedInterviewQuestion = {
 };
 
 export type PracticePlan = {
-  planFormatVersion: 3;
+  planFormatVersion: 4;
   targetRole: string;
   focus: PracticeFocus;
   topics: string;
@@ -56,7 +56,7 @@ export type PracticePlan = {
 export const practicePlanStorageKey = "ai-interview-simulator.practice-plan";
 
 export const defaultPracticePlan: PracticePlan = {
-  planFormatVersion: 3,
+  planFormatVersion: 4,
   targetRole: "Student or internship role",
   focus: "behavioral",
   topics: "",
@@ -101,9 +101,11 @@ export function loadPracticePlan(): PracticePlan {
     if (!stored) {
       return defaultPracticePlan;
     }
-    const parsed = JSON.parse(stored) as Partial<PracticePlan>;
+    const parsed = JSON.parse(stored) as Partial<Omit<PracticePlan, "planFormatVersion">> & {
+      planFormatVersion?: number;
+    };
     return {
-      planFormatVersion: 3,
+      planFormatVersion: 4,
       targetRole: parsed.targetRole?.trim() || defaultPracticePlan.targetRole,
       focus: isPracticeFocus(parsed.focus) ? parsed.focus : defaultPracticePlan.focus,
       topics: parsed.topics?.trim() ?? "",
@@ -115,20 +117,19 @@ export function loadPracticePlan(): PracticePlan {
         typeof parsed.allowAiWhiteboardAnnotations === "boolean"
           ? parsed.allowAiWhiteboardAnnotations
           : defaultPracticePlan.allowAiWhiteboardAnnotations,
-      // Version 3 deliberately clears browser-stored API values. They can
-      // override the fresh project .env values and make a valid replacement key
-      // appear broken until the user manually clears old local storage.
-      liveApis: parsed.planFormatVersion === 3
+      // Versions before 3 may contain stale browser keys that override fresh
+      // project .env values. Preserve settings from version 3 onward.
+      liveApis: (parsed.planFormatVersion ?? 0) >= 3
         ? parseLiveApis(parsed.liveApis)
         : defaultPracticePlan.liveApis,
-      plannerApi: parsed.planFormatVersion === 3
+      plannerApi: (parsed.planFormatVersion ?? 0) >= 3
         ? parsePlannerApi(parsed.plannerApi)
         : defaultPracticePlan.plannerApi,
       directorSettings: parseDirectorSettings(parsed.directorSettings),
-      // Earlier previews could merge numbered questions into one prompt. Require
-      // regeneration after the question-boundary format changed.
+      // Version 4 adds verified one-to-one source mapping. Older previews may
+      // contain merged, omitted, reordered, or rewritten source questions.
       plannedQuestions:
-        parsed.planFormatVersion === 3
+        parsed.planFormatVersion === 4
           ? parsePlannedQuestions(parsed.plannedQuestions)
           : [],
     };

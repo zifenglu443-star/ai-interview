@@ -105,7 +105,7 @@ def test_plan_api_requires_a_configured_text_model(monkeypatch) -> None:
     assert response.json()["detail"] == "Planning API key is not configured. Add it in Settings or .env."
 
 
-def test_plan_provider_owns_question_boundaries_and_keeps_returned_order(monkeypatch) -> None:
+def test_plan_provider_preserves_numbered_multiline_questions(monkeypatch) -> None:
     topics = """1. Consider the function
 f(x)=x^3-3x. Find the values of k for which f(x)=k has three distinct real solutions.
 2. A fair coin is tossed until two consecutive heads appear. Find the expected toss count.
@@ -117,9 +117,9 @@ f(x)=x^3-3x. Find the values of k for which f(x)=k has three distinct real solut
 
         def json(self) -> dict[str, object]:
             return {"choices": [{"message": {"content": json.dumps({"questions": [
-                {"id": "one", "prompt": "Rewritten first question."},
-                {"id": "two", "prompt": "Rewritten second question."},
-                {"id": "three", "prompt": "Rewritten third question."},
+                {"source_id": "source-1", "id": "one", "prompt": "Rewritten first question."},
+                {"source_id": "source-2", "id": "two", "prompt": "Rewritten second question."},
+                {"source_id": "source-3", "id": "three", "prompt": "Rewritten third question."},
             ]})}}]}
 
     monkeypatch.setattr(main.httpx, "post", lambda *_args, **_kwargs: FakeResponse())
@@ -132,11 +132,140 @@ f(x)=x^3-3x. Find the values of k for which f(x)=k has three distinct real solut
     payload = response.json()
     assert payload["provider"] == "provider"
     assert [question["prompt"] for question in payload["questions"]] == [
-        "Rewritten first question.",
-        "Rewritten second question.",
-        "Rewritten third question.",
+        "Consider the function\nf(x)=x^3-3x. Find the values of k for which f(x)=k has three distinct real solutions.",
+        "A fair coin is tossed until two consecutive heads appear. Find the expected toss count.",
+        "Without a calculator, determine which is larger: 2^(100) or 3^(60).",
     ]
     assert sum(question["allocated_seconds"] for question in payload["questions"]) == 900
+
+
+def test_plan_rejects_provider_output_that_merges_source_questions(monkeypatch) -> None:
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {"choices": [{"message": {"content": json.dumps({"questions": [
+                {"source_id": "source-1", "id": "merged", "prompt": "Explain both supplied questions."},
+            ]})}}]}
+
+    monkeypatch.setattr(main.httpx, "post", lambda *_args, **_kwargs: FakeResponse())
+    response = client.post(
+        "/interview/plan",
+        json={
+            "practice_topics": "1. First independent problem.\n2. Second independent problem.",
+            "planner": {"api_key": "test"},
+        },
+    )
+
+    assert response.status_code == 502
+    assert "merged, omitted, or added" in response.json()["detail"]
+
+
+def test_plan_rejects_provider_output_that_reorders_source_questions(monkeypatch) -> None:
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {"choices": [{"message": {"content": json.dumps({"questions": [
+                {"source_id": "source-2", "id": "two", "prompt": "Second."},
+                {"source_id": "source-1", "id": "one", "prompt": "First."},
+            ]})}}]}
+
+    monkeypatch.setattr(main.httpx, "post", lambda *_args, **_kwargs: FakeResponse())
+    response = client.post(
+        "/interview/plan",
+        json={
+            "question_bank": "First question.\nSecond question.",
+            "planner": {"api_key": "test"},
+        },
+    )
+
+    assert response.status_code == 502
+    assert "duplicated or reordered" in response.json()["detail"]
+
+
+def test_plan_preserves_a_single_numbered_question_with_continuation(monkeypatch) -> None:
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {"choices": [{"message": {"content": json.dumps({"questions": [
+                {"source_id": "source-1", "id": "one", "prompt": "Changed by provider."},
+            ]})}}]}
+
+    monkeypatch.setattr(main.httpx, "post", lambda *_args, **_kwargs: FakeResponse())
+    response = client.post(
+        "/interview/plan",
+        json={
+            "question_bank": "1. Solve the equation\nx^2 - 1 = 0",
+            "planner": {"api_key": "test"},
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["questions"][0]["prompt"] == "Solve the equation\nx^2 - 1 = 0"
+
+
+def test_plan_preserves_question_text_after_a_bare_number_marker(monkeypatch) -> None:
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {"choices": [{"message": {"content": json.dumps({"questions": [
+                {"source_id": "source-1", "id": "one", "prompt": "Changed by provider."},
+            ]})}}]}
+
+    monkeypatch.setattr(main.httpx, "post", lambda *_args, **_kwargs: FakeResponse())
+    response = client.post(
+        "/interview/plan",
+        json={
+            "question_bank": "1.\nExplain the invariant.\nInclude the proof.",
+            "planner": {"api_key": "test"},
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["questions"][0]["prompt"] == "Explain the invariant.\nInclude the proof."
+
+
+def test_plan_rejects_empty_numbered_questions_before_calling_provider(monkeypatch) -> None:
+    monkeypatch.setattr(
+        main.httpx,
+        "post",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("provider should not be called")),
+    )
+    response = client.post(
+        "/interview/plan",
+        json={
+            "question_bank": "1.\n2. A real question.",
+            "planner": {"api_key": "test"},
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "Numbered questions cannot be empty."
+
+
+def test_plan_rejects_more_than_twenty_source_items(monkeypatch) -> None:
+    monkeypatch.setattr(
+        main.httpx,
+        "post",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("provider should not be called")),
+    )
+    response = client.post(
+        "/interview/plan",
+        json={
+            "practice_topics": "\n".join(f"Topic {index}" for index in range(21)),
+            "planner": {"api_key": "test"},
+        },
+    )
+
+    assert response.status_code == 422
+    assert "more than 20" in response.json()["detail"]
 
 
 def test_start_requires_a_generated_plan_for_supplied_topics() -> None:
@@ -169,6 +298,7 @@ def test_plan_api_accepts_browser_planner_settings(monkeypatch) -> None:
                                 {
                                     "questions": [
                                         {
+                                            "source_id": "source-1",
                                             "id": "browser-plan",
                                             "prompt": "Explain your approach.",
                                             "focus": "Reasoning",
@@ -211,9 +341,9 @@ def test_plan_api_accepts_browser_planner_settings(monkeypatch) -> None:
         "Content-Type": "application/json",
     }
     prompt = captured["json"]["messages"][1]["content"]  # type: ignore[index]
-    assert "decide the independent question boundaries" in prompt
-    assert "same logical order as the source" in prompt
-    assert "one concrete, independently answerable interview question for each supplied topic" in prompt
+    assert "Return exactly one question for every source_item" in prompt
+    assert "Never merge, omit, duplicate, or reorder source items" in prompt
+    assert '"source_id": "source-1"' in prompt
 
 
 def test_plan_api_rejects_non_https_browser_planner_endpoint() -> None:
