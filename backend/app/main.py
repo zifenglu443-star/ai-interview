@@ -189,7 +189,17 @@ def build_interview_plan(
         response = httpx.post(
             endpoint,
             headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-            json={"model": model, "messages": [{"role": "system", "content": "You create precise interview plans."}, {"role": "user", "content": prompt}], "temperature": 0.2},
+            json={
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": "You create precise interview plans. Return JSON only."},
+                    {"role": "user", "content": prompt},
+                ],
+                "response_format": {"type": "json_object"},
+                "thinking": {"type": "disabled"},
+                "max_tokens": 4096,
+                "temperature": 0.2,
+            },
             timeout=30,
         )
         response.raise_for_status()
