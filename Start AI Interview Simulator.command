@@ -13,11 +13,19 @@ BACKEND_URL="http://127.0.0.1:8000/health"
 
 cd "$PROJECT_DIR" || exit 1
 mkdir -p "$LOG_DIR"
+SOURCE_REVISION=$(/usr/bin/git -C "$PROJECT_DIR" rev-parse HEAD 2>/dev/null || /bin/date +%s)
+RUNNING_REVISION=""
+if [[ -f "$LOG_DIR/frontend-revision" ]]; then
+  RUNNING_REVISION=$(<"$LOG_DIR/frontend-revision")
+fi
 
 # Reuse a healthy local instance. Double-clicking the launcher during an active
-# interview must not destroy the in-memory Director session.
+# interview must not destroy the in-memory Director session. A committed source
+# update deliberately invalidates that reuse so users never keep seeing an old
+# Next.js server after installing a fix.
 if /usr/bin/curl --silent --fail --max-time 1 "$BACKEND_URL" >/dev/null 2>&1 && \
-   /usr/bin/curl --silent --fail --max-time 1 "$FRONTEND_URL" >/dev/null 2>&1; then
+   /usr/bin/curl --silent --fail --max-time 1 "$FRONTEND_URL" >/dev/null 2>&1 && \
+   [[ "$RUNNING_REVISION" == "$SOURCE_REVISION" ]]; then
   /usr/bin/open "$FRONTEND_URL"
   /usr/bin/osascript -l JavaScript -e 'Application("Terminal").hide()' >/dev/null 2>&1 &
   exit 0
@@ -41,7 +49,7 @@ stop_port 3001
 : >"$LOG_DIR/frontend.log"
 
 /usr/bin/nohup npm run start:backend >>"$LOG_DIR/backend.log" 2>&1 </dev/null &
-/usr/bin/nohup /bin/zsh -lc "cd '$PROJECT_DIR' && npm run build && npm run start:frontend" >>"$LOG_DIR/frontend.log" 2>&1 </dev/null &
+/usr/bin/nohup /bin/zsh -lc "cd '$PROJECT_DIR' && npm run build && printf '%s\\n' '$SOURCE_REVISION' > '$LOG_DIR/frontend-revision' && npm run start:frontend" >>"$LOG_DIR/frontend.log" 2>&1 </dev/null &
 
 # Wait separately so Terminal can disappear immediately.
 (

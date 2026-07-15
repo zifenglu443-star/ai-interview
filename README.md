@@ -10,13 +10,17 @@ Double-click [Start AI Interview Simulator.command](<./Start AI Interview Simula
 
 The launcher always:
 
-1. reuses an already healthy local frontend/backend pair, so opening the app
-   again does not destroy an active in-memory interview;
+1. reuses an already healthy local frontend/backend pair when it matches the
+   current Git revision, so opening the app again does not destroy an active
+   in-memory interview;
 2. otherwise stops partial or stale services on ports `3001` and `8000`;
 3. starts FastAPI with the project `.venv`;
 4. creates a fresh production frontend build;
 5. starts Next.js on `http://127.0.0.1:3001`;
 6. opens `http://127.0.0.1:3001/setup` only after both services respond.
+
+After a committed app update, the next launcher run deliberately rebuilds and
+restarts the frontend so the browser cannot keep serving an older interface.
 
 Runtime logs are written to `.runtime-logs/` and are ignored by Git.
 
