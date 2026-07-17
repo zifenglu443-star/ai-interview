@@ -2,6 +2,7 @@ export type InterviewerVideoSignals = {
   emotion: string;
   gesture: string;
   isSpeaking: boolean;
+  signalId?: number;
 };
 
 export type InterviewerPresentation =

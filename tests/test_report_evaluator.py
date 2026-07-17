@@ -1,6 +1,22 @@
 from reporting import AnswerInput, evaluate_answers
 
 
+def test_report_evaluator_returns_zero_when_no_answer_evidence_exists() -> None:
+    report = evaluate_answers(
+        (
+            AnswerInput(question="Question 1", answer=""),
+            AnswerInput(question="Question 2", answer="   "),
+        ),
+        total_questions=2,
+    )
+
+    assert report.clarity == 0
+    assert report.specificity == 0
+    assert report.reasoning_depth == 0
+    assert report.completion == 0
+    assert report.overall == 0
+
+
 def test_report_evaluator_rewards_complete_specific_answers() -> None:
     report = evaluate_answers(
         (

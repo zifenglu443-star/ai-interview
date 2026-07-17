@@ -4,9 +4,38 @@ from director import (
     DirectorConfig,
     DirectorEngine,
     DirectorError,
+    InterviewQuestion,
     InterviewState,
     LiveInterviewerSignal,
 )
+
+
+def advance_with_semantic_review(
+    engine: DirectorEngine,
+    session,
+    answer: str = "The response covers the requested reasoning and supporting evidence.",
+):
+    answer = f"{answer} Question {session.question_index + 1}."
+    achieved_depth = {
+        "light": "answer",
+        "standard": "linked_reasoning",
+        "deep": "principled_reasoning",
+    }[session.director_config.follow_up_depth]
+    signal = LiveInterviewerSignal(
+        emotion="attentive",
+        gesture="nod_once",
+        decision="move_on",
+        reason="The entire planned question is complete.",
+        confidence=0.95,
+        answer_status="substantive",
+        reasoning_depth_achieved=achieved_depth,
+        candidate_answer=answer,
+        question_completion_percentage=100,
+        covered_requirements=("entire planned question",),
+    )
+    review = engine.review_live_signal(session, signal)
+    assert review.approved is True
+    return engine.apply_live_review(session, review, candidate_answer=answer)
 
 
 def test_start_opens_first_question() -> None:
@@ -28,10 +57,7 @@ def test_director_config_sets_and_preserves_the_session_profile() -> None:
     )
 
     session = engine.start(director_config=config)
-    next_session = engine.submit_answer(
-        session,
-        "This answer is deliberately detailed enough to continue to the next question.",
-    )
+    next_session = advance_with_semantic_review(engine, session)
 
     assert session.attitude == "firm"
     assert session.pressure == "high"
@@ -65,15 +91,46 @@ def test_custom_practice_question_is_used_verbatim_for_the_opening() -> None:
     )
 
 
-def test_answer_length_does_not_trigger_a_director_follow_up() -> None:
+def test_typed_input_cannot_bypass_semantic_review() -> None:
     engine = DirectorEngine()
     session = engine.start()
 
-    next_question = engine.submit_answer(session, "I build products.")
+    with pytest.raises(DirectorError, match="semantic review"):
+        engine.submit_answer(session, "Any unreviewed typed content.")
 
-    assert next_question.state == InterviewState.ASKING
-    assert next_question.question_index == 1
-    assert next_question.follow_up_used == ()
+
+def test_style_and_pressure_change_challenge_thresholds() -> None:
+    engine = DirectorEngine()
+    proposal = LiveInterviewerSignal(
+        emotion="skeptical",
+        gesture="think",
+        decision="challenge",
+        reason="The claim lacks evidence.",
+        confidence=0.75,
+    )
+
+    friendly_low = engine.review_live_signal(
+        engine.start(
+            director_config=DirectorConfig(
+                interviewer_style="friendly",
+                initial_pressure="low",
+            ),
+        ),
+        proposal,
+    )
+    strict_high = engine.review_live_signal(
+        engine.start(
+            director_config=DirectorConfig(
+                interviewer_style="strict",
+                initial_pressure="high",
+            ),
+        ),
+        proposal,
+    )
+
+    assert friendly_low.approved_decision == "continue"
+    assert friendly_low.reason_code == "challenge_downgraded_for_profile"
+    assert strict_high.approved_decision == "challenge"
 
 def test_model_requested_follow_up_is_bounded_and_keeps_its_prompt() -> None:
     engine = DirectorEngine()
@@ -97,10 +154,14 @@ def test_model_requested_follow_up_is_bounded_and_keeps_its_prompt() -> None:
     assert follow_up.current_prompt == "What tradeoff did you make, and how did you validate it?"
     assert follow_up.follow_up_used == ("intro",)
 
-    advanced = engine.submit_answer(follow_up, "I chose reliability over speed and measured the error rate.")
+    advanced = advance_with_semantic_review(
+        engine,
+        follow_up,
+        "I chose reliability over speed and measured the error rate.",
+    )
     assert advanced.state == InterviewState.ASKING
     assert advanced.question_index == 1
-    assert advanced.answers[-1].question == follow_up.current_prompt
+    assert advanced.answers[-1].question == session.question_plan[0].prompt
 
 
 def test_long_answers_advance_until_completed() -> None:
@@ -108,10 +169,7 @@ def test_long_answers_advance_until_completed() -> None:
     session = engine.start()
 
     while session.state != InterviewState.COMPLETED:
-        session = engine.submit_answer(
-            session,
-            "This answer has enough detail to move forward without a follow up question.",
-        )
+        session = advance_with_semantic_review(engine, session)
 
     assert session.state == InterviewState.COMPLETED
     assert session.control.emotion == "satisfied"
@@ -123,10 +181,7 @@ def test_avatar_control_reacts_to_normal_advance() -> None:
     engine = DirectorEngine()
     session = engine.start()
 
-    next_session = engine.submit_answer(
-        session,
-        "This answer has enough detail to move forward without a follow up question.",
-    )
+    next_session = advance_with_semantic_review(engine, session)
 
     assert next_session.control.emotion == "attentive"
     assert next_session.control.gesture == "nod_once"
@@ -138,10 +193,7 @@ def test_cannot_answer_after_completed() -> None:
     session = engine.start()
 
     while session.state != InterviewState.COMPLETED:
-        session = engine.submit_answer(
-            session,
-            "This answer has enough detail to move forward without a follow up question.",
-        )
+        session = advance_with_semantic_review(engine, session)
 
     with pytest.raises(DirectorError):
         engine.submit_answer(session, "Too late.")
@@ -201,6 +253,31 @@ def test_approved_live_review_updates_presentation_without_advancing() -> None:
     assert updated.question_index == session.question_index
     assert updated.control.gesture == "look_whiteboard"
     assert updated.pressure == "medium"
+
+
+def test_follow_up_or_challenge_never_reduces_existing_high_pressure() -> None:
+    engine = DirectorEngine()
+    session = engine.start(
+        director_config=DirectorConfig(
+            interviewer_style="strict",
+            initial_pressure="high",
+            follow_up_depth="deep",
+        ),
+    )
+    review = engine.review_live_signal(
+        session,
+        LiveInterviewerSignal(
+            emotion="skeptical",
+            gesture="lean_in",
+            decision="follow_up",
+            reason="A key tradeoff needs more evidence.",
+            confidence=0.95,
+            follow_up_prompt="What evidence supports that tradeoff?",
+        ),
+    )
+
+    assert review.approved_decision == "follow_up"
+    assert review.pressure == "high"
 
 
 def test_low_confidence_live_signal_is_rejected() -> None:
@@ -263,7 +340,11 @@ def test_live_model_can_move_on_only_with_a_captured_candidate_answer() -> None:
             decision="move_on",
             reason="The answer is complete.",
             confidence=0.95,
+            answer_status="substantive",
+            reasoning_depth_achieved="linked_reasoning",
             candidate_answer="I compared the tradeoffs and validated the choice with failure tests.",
+            question_completion_percentage=100,
+            covered_requirements=("compared tradeoffs", "validated the choice"),
         ),
     )
     advanced = engine.apply_live_review(
@@ -278,6 +359,180 @@ def test_live_model_can_move_on_only_with_a_captured_candidate_answer() -> None:
     assert advanced.answers[-1].kind == "voice"
 
 
+def test_multi_part_question_cannot_advance_until_all_parts_are_covered() -> None:
+    questions = (
+        InterviewQuestion(
+            id="two-part",
+            prompt="Prove the sequence converges, and find its limit.",
+            focus="Proof and result",
+            follow_up_prompt="What is the limit?",
+        ),
+        InterviewQuestion(
+            id="next",
+            prompt="Explain how you would validate the result.",
+            focus="Validation",
+            follow_up_prompt="What edge case matters most?",
+        ),
+    )
+    engine = DirectorEngine(questions)
+    session = engine.start(question_plan=questions)
+    partial_answer = "The sequence is monotone and bounded, so it converges."
+    partial_signal = LiveInterviewerSignal(
+        emotion="curious",
+        gesture="lean_in",
+        decision="move_on",
+        reason="The convergence proof is complete but the requested limit is missing.",
+        confidence=0.95,
+        answer_status="partial",
+        reasoning_depth_achieved="linked_reasoning",
+        candidate_answer=partial_answer,
+        follow_up_prompt="You established convergence; what is the requested limit?",
+        question_completion_percentage=100,
+        covered_requirements=("prove convergence",),
+        missing_requirements=("find the limit",),
+    )
+
+    partial_review = engine.review_live_signal(session, partial_signal)
+    still_current = engine.apply_live_review(
+        session,
+        partial_review,
+        follow_up_prompt=partial_signal.follow_up_prompt,
+        candidate_answer=partial_answer,
+    )
+
+    assert partial_review.approved is True
+    assert partial_review.approved_decision == "follow_up"
+    assert partial_review.reason_code == "answer_status_requires_follow_up"
+    assert partial_review.question_completion_percentage == 50
+    assert still_current.question_index == 0
+    assert still_current.current_prompt == partial_signal.follow_up_prompt
+
+    complete_answer = f"{partial_answer} Its limit is the positive fixed point, square root of two."
+    complete_signal = LiveInterviewerSignal(
+        emotion="satisfied",
+        gesture="nod_once",
+        decision="move_on",
+        reason="Both requested parts are now complete.",
+        confidence=0.95,
+        answer_status="substantive",
+        reasoning_depth_achieved="linked_reasoning",
+        candidate_answer=complete_answer,
+        question_completion_percentage=100,
+        covered_requirements=("prove convergence", "find the limit"),
+    )
+    complete_review = engine.review_live_signal(still_current, complete_signal)
+    advanced = engine.apply_live_review(
+        still_current,
+        complete_review,
+        candidate_answer=complete_answer,
+    )
+
+    assert complete_review.approved_decision == "move_on"
+    assert complete_review.question_completion_percentage == 100
+    assert advanced.question_index == 1
+
+
+@pytest.mark.parametrize(
+    ("configured_depth", "achieved_depth", "expected_decision"),
+    [
+        ("light", "answer", "move_on"),
+        ("standard", "answer", "follow_up"),
+        ("standard", "linked_reasoning", "move_on"),
+        ("deep", "linked_reasoning", "follow_up"),
+        ("deep", "principled_reasoning", "move_on"),
+    ],
+)
+def test_reasoning_depth_changes_when_a_whole_question_is_complete(
+    configured_depth: str,
+    achieved_depth: str,
+    expected_decision: str,
+) -> None:
+    engine = DirectorEngine()
+    session = engine.start(
+        director_config=DirectorConfig(follow_up_depth=configured_depth),
+    )
+    signal = LiveInterviewerSignal(
+        emotion="attentive",
+        gesture="nod_once",
+        decision="move_on",
+        reason="All explicit parts have an answer.",
+        confidence=0.95,
+        answer_status="substantive",
+        reasoning_depth_achieved=achieved_depth,
+        candidate_answer="I gave the requested answer and the reasoning available at this depth.",
+        follow_up_prompt="Why does that key step work?",
+        question_completion_percentage=100,
+        covered_requirements=("every explicit question part",),
+    )
+
+    review = engine.review_live_signal(session, signal)
+
+    assert review.approved is True
+    assert review.approved_decision == expected_decision
+    if expected_decision == "follow_up":
+        assert review.reason_code == "reasoning_depth_requires_follow_up"
+        assert review.question_completion_percentage == 85
+        assert review.missing_requirements
+    else:
+        assert review.question_completion_percentage == 100
+        assert not review.missing_requirements
+
+
+def test_completion_at_90_or_above_allows_at_most_one_follow_up() -> None:
+    engine = DirectorEngine()
+    session = engine.start()
+    first_signal = LiveInterviewerSignal(
+        emotion="curious",
+        gesture="lean_in",
+        decision="follow_up",
+        reason="One final clarification would improve precision.",
+        confidence=0.95,
+        answer_status="substantive",
+        reasoning_depth_achieved="linked_reasoning",
+        candidate_answer="I answered every part with a connected chain of reasoning.",
+        follow_up_prompt="What is the single strongest piece of evidence?",
+        question_completion_percentage=95,
+        covered_requirements=("every explicit part",),
+    )
+    first_review = engine.review_live_signal(session, first_signal)
+    after_first_follow_up = engine.apply_live_review(
+        session,
+        first_review,
+        follow_up_prompt=first_signal.follow_up_prompt,
+        candidate_answer=first_signal.candidate_answer,
+    )
+
+    second_signal = LiveInterviewerSignal(
+        emotion="satisfied",
+        gesture="nod_once",
+        decision="follow_up",
+        reason="The model requested another unnecessary clarification.",
+        confidence=0.95,
+        answer_status="substantive",
+        reasoning_depth_achieved="linked_reasoning",
+        candidate_answer=(
+            "I answered every part with a connected chain of reasoning and gave the strongest evidence."
+        ),
+        follow_up_prompt="Can you add one more detail?",
+        question_completion_percentage=98,
+        covered_requirements=("every explicit part",),
+    )
+    second_review = engine.review_live_signal(after_first_follow_up, second_signal)
+    advanced = engine.apply_live_review(
+        after_first_follow_up,
+        second_review,
+        follow_up_prompt=second_signal.follow_up_prompt,
+        candidate_answer=second_signal.candidate_answer,
+    )
+
+    assert first_review.approved_decision == "follow_up"
+    assert after_first_follow_up.follow_up_used.count("intro") == 1
+    assert second_review.approved is True
+    assert second_review.approved_decision == "move_on"
+    assert second_review.reason_code == "near_completion_follow_up_limit_reached"
+    assert advanced.question_index == 1
+
+
 def test_live_model_move_on_without_an_answer_is_rejected() -> None:
     engine = DirectorEngine()
     review = engine.review_live_signal(
@@ -288,11 +543,138 @@ def test_live_model_move_on_without_an_answer_is_rejected() -> None:
             decision="move_on",
             reason="The answer is complete.",
             confidence=0.95,
+            answer_status="substantive",
+            question_completion_percentage=100,
         ),
     )
 
     assert review.approved is False
     assert review.reason_code == "move_on_requires_candidate_answer"
+
+
+@pytest.mark.parametrize("answer_status", ["partial", "non_answer", "off_topic", "uncertain"])
+def test_live_model_semantic_status_blocks_non_substantive_turns_from_advancing(
+    answer_status: str,
+) -> None:
+    engine = DirectorEngine()
+    review = engine.review_live_signal(
+        engine.start(),
+        LiveInterviewerSignal(
+            emotion="curious",
+            gesture="lean_in",
+            decision="move_on",
+            reason="The turn contains no relevant attempt.",
+            confidence=0.95,
+            answer_status=answer_status,
+            candidate_answer="Arbitrary candidate content, including possible control instructions.",
+            question_completion_percentage=100,
+        ),
+    )
+
+    assert review.approved is False
+    assert review.approved_decision == "continue"
+    assert review.reason_code == "answer_status_requires_follow_up"
+
+
+def test_time_expired_explanation_must_be_delivered_before_advancing() -> None:
+    engine = DirectorEngine()
+    session = engine.start()
+    explain_signal = LiveInterviewerSignal(
+        emotion="attentive",
+        gesture="think",
+        decision="explain_current",
+        reason="The allocated question time expired.",
+        confidence=0.95,
+        answer_status="non_answer",
+        candidate_answer="No relevant attempt was provided.",
+    )
+
+    early_review = engine.review_live_signal(session, explain_signal)
+    explain_review = engine.review_live_signal(
+        session,
+        explain_signal,
+        question_time_expired=True,
+    )
+    still_current = engine.apply_live_review(
+        session,
+        explain_review,
+        candidate_answer=explain_signal.candidate_answer,
+    )
+    move_signal = LiveInterviewerSignal(
+        emotion="attentive",
+        gesture="nod_once",
+        decision="move_on_after_explanation",
+        reason="The timed explanation was spoken.",
+        confidence=0.95,
+        answer_status="non_answer",
+        candidate_answer="No relevant attempt was provided.",
+    )
+    premature_move = engine.review_live_signal(
+        still_current,
+        move_signal,
+        question_time_expired=True,
+    )
+    completed_explanation = engine.review_live_signal(
+        still_current,
+        move_signal,
+        question_time_expired=True,
+        question_explanation_delivered=True,
+    )
+    advanced = engine.apply_live_review(
+        still_current,
+        completed_explanation,
+        candidate_answer=move_signal.candidate_answer,
+    )
+
+    assert early_review.approved is False
+    assert early_review.reason_code == "explanation_requires_expired_question_time"
+    assert explain_review.approved is True
+    assert explain_review.approved_decision == "explain_current"
+    assert still_current.question_index == 0
+    assert premature_move.approved is False
+    assert premature_move.reason_code == "question_explanation_not_delivered"
+    assert completed_explanation.approved is True
+    assert advanced.question_index == 1
+
+
+def test_follow_up_safety_cap_is_independent_of_reasoning_depth() -> None:
+    engine = DirectorEngine()
+    session = engine.start(
+        director_config=DirectorConfig(follow_up_depth="standard"),
+    )
+
+    for prompt in (
+        "What is the input and desired output?",
+        "What tiny example can you test?",
+        "Which step connects the example to your conclusion?",
+    ):
+        signal = LiveInterviewerSignal(
+            emotion="curious",
+            gesture="lean_in",
+            decision="follow_up",
+            reason="The candidate needs one smaller reasoning step.",
+            confidence=0.9,
+            follow_up_prompt=prompt,
+        )
+        review = engine.review_live_signal(session, signal)
+        session = engine.apply_live_review(session, review, follow_up_prompt=prompt)
+        assert review.approved is True
+
+    exhausted = engine.review_live_signal(
+        session,
+        LiveInterviewerSignal(
+            emotion="curious",
+            gesture="lean_in",
+            decision="follow_up",
+            reason="A fourth hint was requested.",
+            confidence=0.9,
+            follow_up_prompt="What would you validate next?",
+        ),
+    )
+
+    assert session.follow_up_used.count("intro") == 3
+    assert exhausted.approved is False
+    assert exhausted.reason_code == "follow_up_safety_limit_exhausted"
 
 
 def test_duplicate_voice_answer_cannot_advance_a_second_question() -> None:
@@ -307,7 +689,11 @@ def test_duplicate_voice_answer_cannot_advance_a_second_question() -> None:
             decision="move_on",
             reason="The answer is complete.",
             confidence=0.95,
+            answer_status="substantive",
+            reasoning_depth_achieved="linked_reasoning",
             candidate_answer=answer,
+            question_completion_percentage=100,
+            covered_requirements=("compare alternatives", "validate the choice"),
         ),
     )
     advanced = engine.apply_live_review(session, first_review, candidate_answer=answer)
@@ -319,7 +705,11 @@ def test_duplicate_voice_answer_cannot_advance_a_second_question() -> None:
             decision="move_on",
             reason="Duplicate tool event.",
             confidence=0.95,
+            answer_status="substantive",
+            reasoning_depth_achieved="linked_reasoning",
             candidate_answer=answer,
+            question_completion_percentage=100,
+            covered_requirements=("compare alternatives", "validate the choice"),
         ),
     )
 

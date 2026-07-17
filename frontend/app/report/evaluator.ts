@@ -8,6 +8,13 @@ export type ReportScores = {
   completion: number;
   overall: number;
   suggestions: string[];
+  sufficient_evidence?: boolean;
+};
+
+export type ReportPlannerSettings = {
+  apiKey: string;
+  endpoint: string;
+  model: string;
 };
 
 /** The Python evaluator is the single scoring authority for every report view. */
@@ -15,6 +22,7 @@ export async function evaluateReport(
   apiBase: string,
   answers: InterviewAnswer[],
   totalQuestions?: number,
+  planner?: ReportPlannerSettings,
 ): Promise<ReportScores> {
   const response = await fetch(`${apiBase}/report/evaluate`, {
     method: "POST",
@@ -27,6 +35,14 @@ export async function evaluateReport(
         kind: kind ?? "primary",
       })),
       total_questions: totalQuestions,
+      planner: planner
+        ? {
+            api_key: planner.apiKey,
+            endpoint: planner.endpoint,
+            model: planner.model,
+          }
+        : undefined,
+      prefer_text_model: true,
     }),
   });
   if (!response.ok) throw new Error("Could not evaluate report");

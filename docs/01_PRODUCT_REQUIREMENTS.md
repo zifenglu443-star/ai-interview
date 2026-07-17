@@ -9,7 +9,7 @@ controlled interview session with useful feedback—not an open-ended AI chat.
 
 1. Setup collects target role, practice focus, optional topics/question file,
    reference duration, voice model, and Director settings: interviewer style,
-   initial pressure, follow-up depth, and challenge frequency.
+   initial pressure, expected reasoning depth, and interruption frequency.
    Settings separately stores the optional planning text-model endpoint, key,
    and model. Browser settings override local environment planner values only
    while generating a plan.

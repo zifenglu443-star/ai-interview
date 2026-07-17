@@ -1598,6 +1598,31 @@ p {
   gap: 12px;
 }
 
+.report-filters {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: minmax(220px, 1fr) minmax(180px, 0.4fr);
+}
+
+.report-filters label {
+  color: var(--muted);
+  display: grid;
+  font-size: 13px;
+  font-weight: 700;
+  gap: 6px;
+}
+
+.report-filters input,
+.report-filters select {
+  background: #ffffff;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--ink);
+  font: inherit;
+  min-height: 42px;
+  padding: 8px 12px;
+}
+
 .report-record-link {
   align-items: center;
   background: #ffffff;
@@ -1852,6 +1877,10 @@ p {
     grid-template-columns: 1fr;
   }
 
+  .report-filters {
+    grid-template-columns: 1fr;
+  }
+
   h1 {
     font-size: 36px;
   }
@@ -2034,5 +2063,16 @@ p {
   .leave-call,
   .session-actions {
     width: 100%;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
   }
 }

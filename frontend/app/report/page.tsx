@@ -6,6 +6,7 @@ import {
   interviewStorageKey,
   type InterviewReport,
 } from "../interview/interviewSession";
+import { loadPracticePlan } from "../interview/practicePlan";
 import { evaluateReport, type ReportScores } from "./evaluator";
 
 export default function ReportPage() {
@@ -22,16 +23,22 @@ export default function ReportPage() {
       const parsed = JSON.parse(savedReport) as InterviewReport;
       if (!parsed.completedAt || !Array.isArray(parsed.answers)) throw new Error("Invalid report");
       setReport(parsed);
+      if (parsed.evaluation) setScores(parsed.evaluation);
     } catch {
       window.localStorage.removeItem(interviewStorageKey);
     }
   }, []);
 
   useEffect(() => {
-    if (!report) return;
+    if (!report || report.evaluation) return;
     let active = true;
     setScoreError(false);
-    evaluateReport(apiBase, report.answers, report.totalQuestions)
+    evaluateReport(
+      apiBase,
+      report.answers,
+      report.totalQuestions,
+      loadPracticePlan().plannerApi,
+    )
       .then((result) => {
         if (active) setScores(result);
       })
@@ -73,11 +80,11 @@ export default function ReportPage() {
         <div className="report-grid">
           <article>
             <span>Overall</span>
-            <strong>{scores ? `${scores.overall}` : scoreError ? "Unavailable" : "Pending"}</strong>
+            <strong>{scores ? formatScore(scores, scores.overall) : scoreError ? "Unavailable" : "Pending"}</strong>
           </article>
           <article>
             <span>Reasoning depth</span>
-            <strong>{scores ? `${scores.reasoning_depth}` : scoreError ? "Unavailable" : "Pending"}</strong>
+            <strong>{scores ? formatScore(scores, scores.reasoning_depth) : scoreError ? "Unavailable" : "Pending"}</strong>
           </article>
           <article>
             <span>Questions</span>
@@ -93,22 +100,24 @@ export default function ReportPage() {
           <section className="score-breakdown">
             <article>
               <span>Clarity</span>
-              <strong>{scores.clarity}</strong>
+              <strong>{formatScore(scores, scores.clarity)}</strong>
             </article>
             <article>
               <span>Specificity</span>
-              <strong>{scores.specificity}</strong>
+              <strong>{formatScore(scores, scores.specificity)}</strong>
             </article>
             <article>
               <span>Completion</span>
-              <strong>{scores.completion}</strong>
+              <strong>{formatScore(scores, scores.completion)}</strong>
             </article>
           </section>
         ) : null}
 
         {scores ? (
           <p className="score-disclaimer">
-            {scores.rubric_version ?? "Local rubric"}. These practice indicators are based on visible answer structure and evidence. They do not verify technical correctness or replace human judgment.
+            {scores.sufficient_evidence === false
+              ? "Not enough candidate-answer evidence was captured to produce a meaningful score."
+              : `${scores.rubric_version ?? "Evaluation rubric"}. These practice indicators are based on visible answer structure and evidence. They do not verify technical correctness or replace human judgment.`}
           </p>
         ) : null}
 
@@ -129,10 +138,11 @@ export default function ReportPage() {
 
         {report ? (
           <section className="answer-summary">
-            <h2>Submitted answers</h2>
-            {report.answers.map((answer) => (
+            <h2>Answer summaries used for feedback</h2>
+            <p className="score-disclaimer">One consolidated candidate answer per original planned question. This is evaluation input, not a turn-by-turn conversation.</p>
+            {report.answers.map((answer, index) => (
               <article key={answer.questionId}>
-                <h3>{answer.question}</h3>
+                <h3>{report.plan?.find((question) => question.id === answer.questionId)?.prompt ?? report.plan?.[index]?.prompt ?? answer.question}</h3>
                 <p>{answer.answer || "Skipped"}</p>
               </article>
             ))}
@@ -141,7 +151,7 @@ export default function ReportPage() {
 
         {report?.realtimeTranscript?.length ? (
           <section className="answer-summary">
-            <h2>Realtime transcript</h2>
+            <h2>Interview conversation</h2>
             {report.realtimeTranscript.map((item) => (
               <article key={item.id}>
                 <h3>{item.speaker}</h3>
@@ -180,4 +190,8 @@ function formatDuration(seconds: number) {
 
 function isValidDate(value: string) {
   return Number.isFinite(new Date(value).getTime());
+}
+
+function formatScore(scores: ReportScores, value: number): string {
+  return scores.sufficient_evidence === false ? "Not enough evidence" : String(value);
 }

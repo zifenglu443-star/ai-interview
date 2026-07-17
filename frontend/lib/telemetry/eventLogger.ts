@@ -22,6 +22,10 @@ export type InterviewEventType =
   | "live_control_requested"
   | "live_control_applied"
   | "live_control_rejected"
+  | "progress_verification_requested"
+  | "progress_verification_completed"
+  | "progress_verification_flagged"
+  | "progress_verification_failed"
   | "response_latency_measured";
 
 export type InterviewEventData = Record<

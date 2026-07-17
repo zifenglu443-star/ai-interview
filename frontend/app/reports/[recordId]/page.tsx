@@ -7,7 +7,12 @@ import { evaluateReport, type ReportScores } from "../../report/evaluator";
 import type { InterviewAnswer } from "../../interview/interviewSession";
 
 type TranscriptItem = { id: string; speaker: "candidate" | "interviewer"; text: string };
-type SubmittedAnswer = { interviewer: string; candidate: string; kind: string };
+type AnswerSummary = {
+  question_id: string;
+  original_question: string;
+  candidate_summary: string;
+  kind: string;
+};
 type ArchivedRecord = {
   record_id: string;
   has_whiteboard: boolean;
@@ -20,7 +25,8 @@ type ArchivedRecord = {
     evaluation?: ReportScores;
   };
   conversation: {
-    submitted_question_answers: SubmittedAnswer[];
+    schema_version?: number;
+    answer_summaries?: AnswerSummary[];
     realtime_transcript: TranscriptItem[];
   };
   plan: {
@@ -69,8 +75,21 @@ export default function ArchivedReportPage() {
   }
 
   const plan = record.report.practice_plan;
-  const transcript = record.conversation.realtime_transcript;
-  const questionAnswers = record.conversation.submitted_question_answers;
+  const transcript = record.conversation.realtime_transcript ?? [];
+  const plannedQuestionById = new Map(
+    record.plan.questions.map((question) => [question.id, question.prompt]),
+  );
+  const answerSummaries: AnswerSummary[] = record.conversation.answer_summaries?.length
+    ? record.conversation.answer_summaries
+    : record.report.answers.map((answer, index) => ({
+        question_id: answer.question_id,
+        original_question:
+          plannedQuestionById.get(answer.question_id) ??
+          record.plan.questions[index]?.prompt ??
+          answer.question,
+        candidate_summary: answer.answer,
+        kind: answer.kind ?? "voice",
+      }));
   const factualCompletion = record.report.total_questions > 0
     ? Math.round((record.report.answered_questions / record.report.total_questions) * 100)
     : 0;
@@ -90,19 +109,19 @@ export default function ArchivedReportPage() {
         </div>
 
         <div className="report-grid">
-          <article><span>Overall</span><strong>{scores?.overall ?? "Pending"}</strong></article>
-          <article><span>Reasoning depth</span><strong>{scores ? scores.reasoning_depth ?? "Legacy" : "Pending"}</strong></article>
+          <article><span>Overall</span><strong>{scores ? formatScore(scores, scores.overall) : "Pending"}</strong></article>
+          <article><span>Reasoning depth</span><strong>{scores ? formatScore(scores, scores.reasoning_depth) : "Pending"}</strong></article>
           <article><span>Questions</span><strong>{record.report.answered_questions}/{record.report.total_questions}</strong></article>
         </div>
 
         <section className="answer-summary">
           <h2>Feedback</h2>
           <div className="score-breakdown">
-            <article><span>Clarity</span><strong>{scores?.clarity ?? "Pending"}</strong></article>
-            <article><span>Specificity</span><strong>{scores?.specificity ?? "Pending"}</strong></article>
-            <article><span>Completion</span><strong>{factualCompletion}</strong></article>
+            <article><span>Clarity</span><strong>{scores ? formatScore(scores, scores.clarity) : "Pending"}</strong></article>
+            <article><span>Specificity</span><strong>{scores ? formatScore(scores, scores.specificity) : "Pending"}</strong></article>
+            <article><span>Completion</span><strong>{scores?.sufficient_evidence === false ? "Not enough evidence" : factualCompletion}</strong></article>
           </div>
-          {scores ? <p className="score-disclaimer">{scores.rubric_version ?? "Legacy local rubric"}. Practice indicators measure visible answer structure and evidence; they do not verify technical correctness or replace human judgment.</p> : null}
+          {scores ? <p className="score-disclaimer">{scores.sufficient_evidence === false ? "Not enough candidate-answer evidence was captured to produce a meaningful score." : `${scores.rubric_version ?? "Evaluation rubric"}. Practice indicators measure visible answer structure and evidence; they do not verify technical correctness or replace human judgment.`}</p> : null}
           {scores?.suggestions.map((suggestion) => <article key={suggestion}><p>{suggestion}</p></article>) ?? <p>Feedback is unavailable while the backend is offline.</p>}
         </section>
 
@@ -113,16 +132,22 @@ export default function ArchivedReportPage() {
         ))}</section> : null}
 
         <section className="answer-summary">
-          <h2>Question and answer record</h2>
-          {(questionAnswers.length ? questionAnswers : answers.map((answer) => ({ interviewer: answer.question, candidate: answer.answer, kind: answer.kind ?? "primary" }))).map((item, index) => (
-            <article key={`${item.interviewer}-${index}`}>
-              <h3>Interviewer</h3><p>{item.interviewer}</p>
-              <h3>Candidate</h3><p>{item.candidate || "Skipped"}</p>
+          <h2>Answer summaries used for feedback</h2>
+          <p className="score-disclaimer">One consolidated candidate answer per original planned question. This is evaluation input, not a turn-by-turn conversation.</p>
+          {answerSummaries.map((item, index) => (
+            <article key={`${item.question_id}-${index}`}>
+              <h3>Original question</h3><p>{item.original_question}</p>
+              <h3>Candidate answer summary</h3><p>{item.candidate_summary || "Skipped"}</p>
             </article>
           ))}
         </section>
 
-        {transcript.length ? <section className="answer-summary"><h2>Voice conversation</h2>{transcript.map((item) => <article key={item.id}><h3>{item.speaker === "candidate" ? "Candidate" : "Interviewer"}</h3><p>{item.text}</p></article>)}</section> : null}
+        <section className="answer-summary">
+          <h2>Interview conversation</h2>
+          {transcript.length
+            ? transcript.map((item) => <article key={item.id}><h3>{item.speaker === "candidate" ? "Candidate" : "Interviewer"}</h3><p>{item.text}</p></article>)
+            : <p>Turn-by-turn conversation was not stored for this legacy interview.</p>}
+        </section>
 
         {record.has_whiteboard ? <section className="answer-summary whiteboard-report"><h2>Final whiteboard</h2><img alt="Final interview whiteboard" src={`${apiBase}/interview/records/${encodeURIComponent(record.record_id)}/whiteboard`} /></section> : null}
 
@@ -143,4 +168,8 @@ function formatDate(value: string) {
 
 function formatDuration(seconds: number) {
   return seconds >= 60 ? `${Math.round(seconds / 60)} min` : `${seconds}s`;
+}
+
+function formatScore(scores: ReportScores, value: number): string {
+  return scores.sufficient_evidence === false ? "Not enough evidence" : String(value);
 }
