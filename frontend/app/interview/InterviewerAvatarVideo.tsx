@@ -39,8 +39,21 @@ export default function InterviewerAvatarVideo(props: InterviewerVideoSignals) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const [activeClip, setActiveClip] = useState<ActiveClip | null>(null);
   const [settledActionKey, setSettledActionKey] = useState<string | null>(null);
+  const [prefersReducedMotion, setPrefersReducedMotion] = useState(false);
 
   useEffect(() => {
+    const query = window.matchMedia("(prefers-reduced-motion: reduce)");
+    const updatePreference = () => setPrefersReducedMotion(query.matches);
+    updatePreference();
+    query.addEventListener("change", updatePreference);
+    return () => query.removeEventListener("change", updatePreference);
+  }, []);
+
+  useEffect(() => {
+    if (prefersReducedMotion) {
+      setActiveClip(null);
+      return;
+    }
     if (presentation.kind === "idle") {
       if (previousPresentationKeyRef.current === "idle") return;
       previousPresentationKeyRef.current = "idle";
@@ -49,9 +62,10 @@ export default function InterviewerAvatarVideo(props: InterviewerVideoSignals) {
       setActiveClip(null);
       return;
     }
+    const actionIdentity = `${presentation.key}:${props.signalId ?? 0}`;
     if (
       presentation.kind === "action" &&
-      handledActionKeyRef.current === presentation.key
+      handledActionKeyRef.current === actionIdentity
     ) {
       previousPresentationKeyRef.current = presentation.key;
       setSettledActionKey(presentation.key);
@@ -63,7 +77,7 @@ export default function InterviewerAvatarVideo(props: InterviewerVideoSignals) {
     if (presentation.key === previousPresentationKeyRef.current) return;
     previousPresentationKeyRef.current = presentation.key;
     if (presentation.kind === "action") {
-      handledActionKeyRef.current = presentation.key;
+      handledActionKeyRef.current = actionIdentity;
       setSettledActionKey(null);
     }
     if (presentation.sources.length === 0) {
@@ -77,13 +91,13 @@ export default function InterviewerAvatarVideo(props: InterviewerVideoSignals) {
       presentationKey: presentation.key,
       source: pickSource(presentation.sources),
     });
-  }, [presentation.key, presentation.kind]);
+  }, [prefersReducedMotion, presentation.key, presentation.kind, props.signalId]);
 
   useEffect(() => {
     const canBlink =
       presentation.kind === "idle" ||
       (presentation.kind === "action" && settledActionKey === presentation.key);
-    if (!canBlink || activeClip) return;
+    if (prefersReducedMotion || !canBlink || activeClip) return;
     const delay = 2_500 + Math.floor(Math.random() * 2_500);
     blinkTimerRef.current = window.setTimeout(() => {
       // Occasional ambient movement keeps the interviewer present without
@@ -108,7 +122,7 @@ export default function InterviewerAvatarVideo(props: InterviewerVideoSignals) {
       if (blinkTimerRef.current !== null) window.clearTimeout(blinkTimerRef.current);
       blinkTimerRef.current = null;
     };
-  }, [activeClip, presentation.key, presentation.kind, settledActionKey]);
+  }, [activeClip, prefersReducedMotion, presentation.key, presentation.kind, settledActionKey]);
 
   useEffect(() => {
     const video = clipVideoRef.current;
@@ -147,7 +161,7 @@ export default function InterviewerAvatarVideo(props: InterviewerVideoSignals) {
   return (
     <div aria-label="AI interviewer video" className="interviewer-avatar-video" role="img">
       <img alt="" className="interviewer-avatar-still" src={INTERVIEWER_VIDEO_PATHS.idle} />
-      {activeClip ? (
+      {activeClip && !prefersReducedMotion ? (
         <>
           <canvas
             aria-hidden="true"

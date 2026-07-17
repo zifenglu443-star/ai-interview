@@ -12,6 +12,14 @@ type DirectorDashboardProps = {
   candidateSpeakingMs: number;
   interviewerSpeakingMs: number;
   estimatedLatencyMs: number | null;
+  latencyBreakdown: {
+    vadCommitMs: number | null;
+    turnToToolMs: number | null;
+    directorRoundTripMs: number | null;
+    toolToAudioMs: number | null;
+  };
+  questionCompletionPercentage: number;
+  missingRequirements: string[];
   events: InterviewEvent[];
   canExport: boolean;
   onExport: () => void;
@@ -27,6 +35,9 @@ export default function DirectorDashboard({
   candidateSpeakingMs,
   interviewerSpeakingMs,
   estimatedLatencyMs,
+  latencyBreakdown,
+  questionCompletionPercentage,
+  missingRequirements,
   events,
   canExport,
   onExport,
@@ -79,10 +90,10 @@ export default function DirectorDashboard({
         <strong>
           {formatLabel(config.interviewer_style)} · {formatLabel(config.initial_pressure)}
           {" pressure · "}
-          {formatLabel(config.follow_up_depth)} follow-up
+          {formatReasoningDepth(config.follow_up_depth)} reasoning depth
         </strong>
         <small>
-          {formatLabel(config.interruption_frequency)} challenge frequency · Gemini-owned turn detection
+          {formatLabel(config.interruption_frequency)} interruption frequency · provider VAD with staged latency tracing
         </small>
       </div>
 
@@ -132,11 +143,34 @@ export default function DirectorDashboard({
           <dt>Latency</dt>
           <dd>{estimatedLatencyMs === null ? "Pending" : `${estimatedLatencyMs}ms`}</dd>
         </div>
+        <div>
+          <dt>VAD silence</dt>
+          <dd>{formatLatency(latencyBreakdown.vadCommitMs)}</dd>
+        </div>
+        <div>
+          <dt>Tool wait</dt>
+          <dd>{formatLatency(latencyBreakdown.turnToToolMs)}</dd>
+        </div>
+        <div>
+          <dt>Review</dt>
+          <dd>{formatLatency(latencyBreakdown.directorRoundTripMs)}</dd>
+        </div>
+        <div>
+          <dt>Resume</dt>
+          <dd>{formatLatency(latencyBreakdown.toolToAudioMs)}</dd>
+        </div>
+        <div>
+          <dt>Completion</dt>
+          <dd>{questionCompletionPercentage}%</dd>
+        </div>
       </dl>
 
       <div className="director-current-question">
         <span>Current question</span>
         <p>{telemetry.currentQuestion ?? "Waiting for the interview to start."}</p>
+        {missingRequirements.length ? (
+          <small>Missing: {missingRequirements.join(" · ")}</small>
+        ) : null}
       </div>
 
       {telemetry.whiteboardAction ? (
@@ -180,6 +214,14 @@ function formatDuration(durationMs: number): string {
   return `${minutes}:${seconds.toString().padStart(2, "0")}`;
 }
 
+function formatLatency(latencyMs: number | null): string {
+  return latencyMs === null ? "—" : `${latencyMs}ms`;
+}
+
 function formatLabel(value: string): string {
   return value.replaceAll("_", " ").replaceAll("-", " ");
+}
+
+function formatReasoningDepth(value: string): string {
+  return { light: "low", standard: "medium", deep: "high" }[value] ?? value;
 }

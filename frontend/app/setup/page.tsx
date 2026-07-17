@@ -228,7 +228,7 @@ export default function SetupPage() {
                 </select>
               </label>
               <label>
-                Follow-up depth
+                Expected reasoning depth
                 <select
                   onChange={(event) =>
                     setPlan((current) => ({
@@ -241,13 +241,14 @@ export default function SetupPage() {
                   }
                   value={plan.directorSettings.followUpDepth}
                 >
-                  <option value="light">Light</option>
-                  <option value="standard">Standard</option>
-                  <option value="deep">Deep</option>
+                  <option value="light">Low · answer each requested part</option>
+                  <option value="standard">Medium · connect every key step</option>
+                  <option value="deep">High · explain why the steps work</option>
                 </select>
+                <span className="input-hint">Controls when the whole question counts as complete, not how many times the interviewer may ask.</span>
               </label>
               <label>
-                Challenge frequency
+                Interruption frequency
                 <select
                   onChange={(event) =>
                     setPlan((current) => ({
@@ -303,7 +304,7 @@ export default function SetupPage() {
               <option value={20}>20 minutes</option>
               <option value={30}>30 minutes</option>
             </select>
-            <span className="input-hint">A flexible reference. The interviewer may shorten, extend, or skip lower-value questions when it serves the interview.</span>
+            <span className="input-hint">A reference for pacing and time allocation. Locked questions are not skipped merely to save time.</span>
           </label>
 
           <label className="checkbox-row">

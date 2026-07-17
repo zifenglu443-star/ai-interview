@@ -35,6 +35,16 @@ def evaluate_answers(
     }
     total = max(total_questions if total_questions is not None else len(answers), 1)
     completion_ratio = min(len(answered_question_ids) / total, 1)
+    if not non_empty_answers:
+        return EvaluationReport(
+            rubric_version=EVALUATION_RUBRIC_VERSION,
+            clarity=0,
+            specificity=0,
+            reasoning_depth=0,
+            completion=0,
+            overall=0,
+            suggestions=("No scorable candidate answer was provided.",),
+        )
     average_words = (
         sum(_answer_units(answer.answer) for answer in non_empty_answers)
         / max(len(non_empty_answers), 1)

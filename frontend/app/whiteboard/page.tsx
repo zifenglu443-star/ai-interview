@@ -26,7 +26,7 @@ export default function WhiteboardPage() {
           </p>
           <div className="snapshot-status">
             <span className="live-dot" />
-            Autosaving locally
+            Autosaved locally · snapshots shared with interviewer
           </div>
         </aside>
 

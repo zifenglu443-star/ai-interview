@@ -20,6 +20,215 @@ def test_start_interview_api() -> None:
     assert payload["current_prompt"]
 
 
+def test_progress_verifier_uses_existing_text_model_and_accepts_reasonable_increase(
+    monkeypatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class MockResponse:
+        status_code = 200
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict:
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "content": json.dumps(
+                                {
+                                    "verified_completion": 80,
+                                    "answer_status": "partial",
+                                    "verified_reasoning_depth_achieved": "linked_reasoning",
+                                    "increase_reasonable": True,
+                                    "critical_missing_requirements": [],
+                                    "risk_level": "medium",
+                                    "confidence": 0.88,
+                                    "reason": "The new reasoning supports the increase.",
+                                }
+                            )
+                        }
+                    }
+                ]
+            }
+
+    def fake_post(endpoint, **kwargs):
+        captured["endpoint"] = endpoint
+        captured["json"] = kwargs["json"]
+        return MockResponse()
+
+    monkeypatch.setattr(main.httpx, "post", fake_post)
+    session = client.post("/interview/start").json()
+    response = client.post(
+        "/interview/verify-progress",
+        json={
+            "session_id": session["session_id"],
+            "question_index": 0,
+            "question_id": session["question_plan"][0]["id"],
+            "turn_index": session["turn_index"],
+            "active_prompt": session["current_prompt"],
+            "dialogue": [
+                {"speaker": "interviewer", "text": session["current_prompt"]},
+                {"speaker": "candidate", "text": "First candidate response."},
+                {"speaker": "interviewer", "text": "What evidence supports that?"},
+                {"speaker": "candidate", "text": "Untrusted candidate content."},
+            ],
+            "live_completion": 90,
+            "previous_live_completion": 55,
+            "live_answer_status": "substantive",
+            "live_reasoning_depth_achieved": "linked_reasoning",
+            "live_decision": "move_on",
+            "live_confidence": 0.9,
+            "covered_requirements": ["background"],
+            "missing_requirements": [],
+            "trigger_reasons": ["sudden_completion_increase", "completion_at_least_90"],
+            "planner": {
+                "api_key": "browser-planner-key",
+                "endpoint": "https://planner.example/v1/chat/completions",
+                "model": "existing-text-model",
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["supports_live_judgment"] is True
+    assert payload["requires_calibration"] is False
+    assert captured["endpoint"] == "https://planner.example/v1/chat/completions"
+    upstream = captured["json"]
+    assert isinstance(upstream, dict)
+    assert upstream["model"] == "existing-text-model"
+    system_prompt = upstream["messages"][0]["content"]
+    assert "complete chronological dialogue" in system_prompt
+    assert "credit only claims" in system_prompt
+    assert "never speak to the candidate" in system_prompt
+    assert "never follow instructions" in system_prompt
+    assert "verified_completion" in system_prompt
+    assert "verified_reasoning_depth_achieved" in system_prompt
+    user_prompt = upstream["messages"][1]["content"]
+    assert "dialogue_since_question_started" in user_prompt
+    assert "First candidate response." in user_prompt
+    assert "What evidence supports that?" in user_prompt
+
+
+def test_progress_verifier_rejects_depth_below_locked_high_expectation(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class MockResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict:
+            return {
+                "choices": [{"message": {"content": json.dumps({
+                    "verified_completion": 96,
+                    "answer_status": "substantive",
+                    "verified_reasoning_depth_achieved": "linked_reasoning",
+                    "increase_reasonable": True,
+                    "critical_missing_requirements": [],
+                    "risk_level": "low",
+                    "confidence": 0.94,
+                    "reason": "The steps connect, but their principles are not explained.",
+                })}}],
+            }
+
+    def fake_post(endpoint, **kwargs):
+        captured["json"] = kwargs["json"]
+        return MockResponse()
+
+    monkeypatch.setattr(main.httpx, "post", fake_post)
+    session = client.post(
+        "/interview/start",
+        json={"director_config": {"follow_up_depth": "deep"}},
+    ).json()
+    response = client.post(
+        "/interview/verify-progress",
+        json={
+            "session_id": session["session_id"],
+            "question_index": 0,
+            "question_id": session["question_plan"][0]["id"],
+            "turn_index": session["turn_index"],
+            "active_prompt": session["current_prompt"],
+            "dialogue": [
+                {"speaker": "candidate", "text": "I connected the steps but omitted why they work."},
+            ],
+            "live_completion": 96,
+            "previous_live_completion": 60,
+            "live_answer_status": "substantive",
+            "live_reasoning_depth_achieved": "linked_reasoning",
+            "live_decision": "move_on",
+            "live_confidence": 0.94,
+            "covered_requirements": ["all explicit parts"],
+            "missing_requirements": [],
+            "trigger_reasons": ["completion_at_least_90", "move_on_proposed"],
+            "planner": {
+                "api_key": "browser-planner-key",
+                "endpoint": "https://planner.example/v1/chat/completions",
+                "model": "existing-text-model",
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["supports_live_judgment"] is False
+    assert response.json()["requires_calibration"] is True
+    upstream = captured["json"]
+    assert isinstance(upstream, dict)
+    user_prompt = upstream["messages"][1]["content"]
+    assert '"expected_reasoning_depth": "deep"' in user_prompt
+    assert '"required_reasoning_depth_achieved": "principled_reasoning"' in user_prompt
+
+
+def test_negative_progress_verification_affects_a_later_live_review_without_rewind() -> None:
+    session = client.post("/interview/start").json()
+    question = session["question_plan"][0]
+    response = client.post(
+        "/interview/live-control",
+        json={
+            "session_id": session["session_id"],
+            "proposal": {
+                "emotion": "attentive",
+                "gesture": "nod_once",
+                "decision": "move_on",
+                "reason": "The answer appears complete.",
+                "confidence": 0.95,
+                "answer_status": "substantive",
+                "reasoning_depth_achieved": "linked_reasoning",
+                "candidate_answer": "A response with some relevant material.",
+                "question_completion_percentage": 95,
+                "covered_requirements": ["background", "target role"],
+                "missing_requirements": [],
+            },
+            "progress_verification": {
+                "verification_id": "verification-one",
+                "question_index": 0,
+                "question_id": question["id"],
+                "turn_index": session["turn_index"],
+                "verified_completion": 70,
+                "answer_status": "partial",
+                "verified_reasoning_depth_achieved": "answer",
+                "increase_reasonable": False,
+                "critical_missing_requirements": ["connection between background and role"],
+                "risk_level": "high",
+                "confidence": 0.9,
+                "reason": "A required connection is missing.",
+                "supports_live_judgment": False,
+                "requires_calibration": True,
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["verification_applied"] is True
+    assert payload["verification_id"] == "verification-one"
+    assert payload["approved"] is False
+    assert payload["question_completion_percentage"] == 50
+    assert any("coherent chain" in item for item in payload["missing_requirements"])
+    assert payload["session"]["question_index"] == 0
+
+
 def test_start_interview_api_accepts_a_practice_plan() -> None:
     response = client.post(
         "/interview/start",
@@ -387,7 +596,7 @@ def test_start_interview_api_locks_the_director_configuration() -> None:
     }
 
 
-def test_answer_api_moves_state_forward() -> None:
+def test_answer_api_rejects_unreviewed_typed_progression() -> None:
     start_response = client.post("/interview/start")
     session = start_response.json()
 
@@ -402,11 +611,8 @@ def test_answer_api_moves_state_forward() -> None:
         },
     )
 
-    assert answer_response.status_code == 200
-    payload = answer_response.json()
-    assert payload["state"] == "asking"
-    assert payload["question_index"] == 1
-    assert len(payload["answers"]) == 1
+    assert answer_response.status_code == 409
+    assert "semantic review" in answer_response.json()["detail"]
 
 
 def test_live_control_is_reviewed_by_director() -> None:
@@ -444,7 +650,7 @@ def test_live_control_validates_whiteboard_annotations() -> None:
             "session_id": session["session_id"],
             "proposal": {
                 "emotion": "skeptical",
-                "gesture": "look_whiteboard",
+                "gesture": "nod_once",
                 "decision": "challenge",
                 "reason": "A material diagram error needs clarification.",
                 "confidence": 0.9,
@@ -457,7 +663,36 @@ def test_live_control_validates_whiteboard_annotations() -> None:
     )
 
     assert response.status_code == 200
-    assert [action["kind"] for action in response.json()["whiteboard_actions"]] == ["circle", "note"]
+    payload = response.json()
+    assert [action["kind"] for action in payload["whiteboard_actions"]] == ["circle", "note"]
+    assert payload["control"]["gesture"] == "take_note"
+    assert payload["session"]["control"]["gesture"] == "take_note"
+
+
+def test_live_control_graphic_annotation_drives_whiteboard_gesture() -> None:
+    session = client.post("/interview/start").json()
+    response = client.post(
+        "/interview/live-control",
+        json={
+            "session_id": session["session_id"],
+            "proposal": {
+                "emotion": "attentive",
+                "gesture": "idle",
+                "decision": "continue",
+                "reason": "A diagram region needs emphasis.",
+                "confidence": 0.9,
+                "whiteboard_actions": [
+                    {"kind": "highlight", "x": 0.2, "y": 0.3, "w": 0.2, "h": 0.1}
+                ],
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert [action["kind"] for action in payload["whiteboard_actions"]] == ["highlight"]
+    assert payload["control"]["gesture"] == "look_whiteboard"
+    assert payload["session"]["control"]["gesture"] == "look_whiteboard"
 
 
 def test_live_control_rejects_out_of_range_whiteboard_coordinates() -> None:
@@ -518,7 +753,12 @@ def test_live_control_move_on_advances_real_progress_with_voice_answer() -> None
                 "decision": "move_on",
                 "reason": "The current question is sufficiently answered.",
                 "confidence": 0.95,
+                "answer_status": "substantive",
+                "reasoning_depth_achieved": "linked_reasoning",
                 "candidate_answer": "I compared alternatives, stated the tradeoff, and described how I validated it.",
+                "question_completion_percentage": 100,
+                "covered_requirements": ["compared alternatives", "validated the choice"],
+                "missing_requirements": [],
             },
         },
     )
@@ -526,8 +766,121 @@ def test_live_control_move_on_advances_real_progress_with_voice_answer() -> None
     assert response.status_code == 200
     payload = response.json()
     assert payload["approved_decision"] == "move_on"
+    assert payload["answer_status"] == "substantive"
     assert payload["session"]["question_index"] == 1
     assert payload["session"]["answers"][0]["kind"] == "voice"
+
+
+def test_live_control_keeps_multi_part_question_when_completion_is_partial() -> None:
+    session = client.post(
+        "/interview/start",
+        json={
+            "planned_questions": [
+                {
+                    "id": "two-part",
+                    "prompt": "Prove the sequence converges, and find its limit.",
+                    "focus": "Proof and result",
+                    "follow_up_prompt": "What is the limit?",
+                    "allocated_seconds": 300,
+                },
+                {
+                    "id": "next",
+                    "prompt": "How would you validate it?",
+                    "focus": "Validation",
+                    "follow_up_prompt": "Which edge case matters?",
+                    "allocated_seconds": 300,
+                },
+            ],
+        },
+    ).json()
+    response = client.post(
+        "/interview/live-control",
+        json={
+            "session_id": session["session_id"],
+            "proposal": {
+                "emotion": "curious",
+                "gesture": "lean_in",
+                "decision": "move_on",
+                "reason": "Only the convergence proof was supplied.",
+                "confidence": 0.95,
+                "answer_status": "partial",
+                "reasoning_depth_achieved": "linked_reasoning",
+                "candidate_answer": "It is monotone and bounded, so it converges.",
+                "follow_up_prompt": "You proved convergence; what is the requested limit?",
+                "question_completion_percentage": 100,
+                "covered_requirements": ["prove convergence"],
+                "missing_requirements": ["find the limit"],
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["approved_decision"] == "follow_up"
+    assert payload["answer_status"] == "partial"
+    assert payload["reason_code"] == "answer_status_requires_follow_up"
+    assert payload["question_completion_percentage"] == 50
+    assert payload["missing_requirements"] == ["find the limit"]
+    assert payload["session"]["question_index"] == 0
+    assert payload["session"]["current_prompt"] == "You proved convergence; what is the requested limit?"
+
+
+def test_live_control_requires_spoken_timed_explanation_before_transition() -> None:
+    session = client.post("/interview/start").json()
+    explain_proposal = {
+        "emotion": "attentive",
+        "gesture": "think",
+        "decision": "explain_current",
+        "reason": "The question time expired.",
+        "confidence": 0.95,
+        "answer_status": "non_answer",
+        "candidate_answer": "No relevant attempt was provided.",
+    }
+
+    early = client.post(
+        "/interview/live-control",
+        json={"session_id": session["session_id"], "proposal": explain_proposal},
+    ).json()
+    explanation_authorized = client.post(
+        "/interview/live-control",
+        json={
+            "session_id": session["session_id"],
+            "proposal": explain_proposal,
+            "question_time_expired": True,
+        },
+    ).json()
+    move_proposal = {
+        **explain_proposal,
+        "decision": "move_on_after_explanation",
+        "reason": "The explanation was delivered.",
+    }
+    premature_move = client.post(
+        "/interview/live-control",
+        json={
+            "session_id": session["session_id"],
+            "proposal": move_proposal,
+            "question_time_expired": True,
+        },
+    ).json()
+    completed_move = client.post(
+        "/interview/live-control",
+        json={
+            "session_id": session["session_id"],
+            "proposal": move_proposal,
+            "question_time_expired": True,
+            "question_explanation_delivered": True,
+        },
+    ).json()
+
+    assert early["approved"] is False
+    assert early["reason_code"] == "explanation_requires_expired_question_time"
+    assert explanation_authorized["approved"] is True
+    assert explanation_authorized["approved_decision"] == "explain_current"
+    assert explanation_authorized["session"]["question_index"] == 0
+    assert premature_move["approved"] is False
+    assert premature_move["reason_code"] == "question_explanation_not_delivered"
+    assert completed_move["approved"] is True
+    assert completed_move["session"]["question_index"] == 1
 
 
 def test_live_control_rejects_unknown_values() -> None:
@@ -548,6 +901,25 @@ def test_live_control_rejects_unknown_values() -> None:
     )
 
     assert response.status_code == 422
+
+
+def test_live_control_safely_rejects_incomplete_provider_signal() -> None:
+    session = client.post("/interview/start").json()
+
+    response = client.post(
+        "/interview/live-control",
+        json={
+            "session_id": session["session_id"],
+            "proposal": {},
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["approved"] is False
+    assert payload["approved_decision"] == "continue"
+    assert payload["reason_code"] == "confidence_below_threshold"
+    assert payload["session"]["question_index"] == 0
 
 
 def test_archive_rejects_unbounded_transcript_history() -> None:
@@ -592,10 +964,21 @@ def test_archive_interview_writes_report_conversation_and_whiteboard(tmp_path, m
     monkeypatch.setattr(main, "INTERVIEW_RECORDS_DIRECTORY", tmp_path)
     session = client.post("/interview/start").json()
     assert client.post(
-        "/interview/answer",
+        "/interview/live-control",
         json={
             "session_id": session["session_id"],
-            "answer": "I improved the onboarding flow with clearer guidance for new users.",
+            "proposal": {
+                "emotion": "attentive",
+                "gesture": "nod_once",
+                "decision": "move_on",
+                "reason": "The planned question is complete.",
+                "confidence": 0.95,
+                "answer_status": "substantive",
+                "reasoning_depth_achieved": "linked_reasoning",
+                "candidate_answer": "I improved the onboarding flow with clearer guidance for new users.",
+                "question_completion_percentage": 100,
+                "covered_requirements": ["entire planned question"],
+            },
         },
     ).status_code == 200
     assert client.post("/interview/end", json={"session_id": session["session_id"]}).status_code == 200
@@ -616,8 +999,8 @@ def test_archive_interview_writes_report_conversation_and_whiteboard(tmp_path, m
                     }
                 ],
                 "realtime_transcript": [
-                    {"id": "new", "speaker": "interviewer", "text": "Thank you."},
                     {"id": "old", "speaker": "candidate", "text": "My answer."},
+                    {"id": "new", "speaker": "interviewer", "text": "Thank you."},
                 ],
             },
             "target_role": "Software Engineering Intern",
@@ -633,6 +1016,7 @@ def test_archive_interview_writes_report_conversation_and_whiteboard(tmp_path, m
     )
 
     assert response.status_code == 200
+    assert response.json()["evaluation"]["rubric_version"] == "local-heuristic-v2"
     record_directory = tmp_path / response.json()["record_id"]
     assert (record_directory / "report.json").exists()
     assert (record_directory / "conversation.json").exists()
@@ -645,7 +1029,9 @@ def test_archive_interview_writes_report_conversation_and_whiteboard(tmp_path, m
     assert session["session_id"] not in main.sessions
 
     conversation = json.loads((record_directory / "conversation.json").read_text())
+    assert conversation["schema_version"] == 2
     assert conversation["realtime_transcript"][0]["id"] == "old"
+    assert conversation["answer_summaries"][0]["original_question"] == session["current_prompt"]
 
     summaries = client.get("/interview/records")
     assert summaries.status_code == 200
@@ -653,7 +1039,7 @@ def test_archive_interview_writes_report_conversation_and_whiteboard(tmp_path, m
 
     detail = client.get(f"/interview/records/{record_directory.name}")
     assert detail.status_code == 200
-    assert detail.json()["conversation"]["submitted_question_answers"][0]["candidate"]
+    assert detail.json()["conversation"]["answer_summaries"][0]["candidate_summary"]
 
     whiteboard = client.get(f"/interview/records/{record_directory.name}/whiteboard")
     assert whiteboard.status_code == 200
@@ -758,7 +1144,7 @@ def test_record_list_hides_in_progress_atomic_archive_directory(tmp_path, monkey
     assert response.json() == []
 
 
-def test_answer_uses_server_session_id() -> None:
+def test_answer_endpoint_keeps_server_session_unchanged() -> None:
     session = client.post("/interview/start").json()
     response = client.post(
         "/interview/answer",
@@ -768,5 +1154,6 @@ def test_answer_uses_server_session_id() -> None:
         },
     )
 
-    assert response.status_code == 200
-    assert response.json()["question_index"] == 1
+    assert response.status_code == 409
+    current = client.post("/interview/end", json={"session_id": session["session_id"]})
+    assert current.json()["question_index"] == 0

@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 type InterviewRecordSummary = {
   record_id: string;
@@ -18,6 +18,8 @@ export default function ReportsPage() {
   const [isLoading, setIsLoading] = useState(true);
   const [deleteCandidateId, setDeleteCandidateId] = useState<string | null>(null);
   const [deletingRecordId, setDeletingRecordId] = useState<string | null>(null);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [recordFilter, setRecordFilter] = useState<"all" | "complete" | "incomplete" | "whiteboard">("all");
   const apiBase = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://127.0.0.1:8000";
 
   useEffect(() => {
@@ -30,6 +32,19 @@ export default function ReportsPage() {
       .catch(() => setError("Reports could not be loaded. Start the Python backend first."))
       .finally(() => setIsLoading(false));
   }, [apiBase]);
+
+  const filteredRecords = useMemo(() => {
+    const query = searchQuery.trim().toLocaleLowerCase();
+    return records.filter((record) => {
+      const matchesQuery = !query || [record.target_role, formatDate(record.completed_at)]
+        .some((value) => value.toLocaleLowerCase().includes(query));
+      const matchesFilter = recordFilter === "all"
+        || (recordFilter === "complete" && record.answered_questions >= record.total_questions)
+        || (recordFilter === "incomplete" && record.answered_questions < record.total_questions)
+        || (recordFilter === "whiteboard" && record.has_whiteboard);
+      return matchesQuery && matchesFilter;
+    });
+  }, [recordFilter, records, searchQuery]);
 
   async function deleteRecord(recordId: string) {
     setDeletingRecordId(recordId);
@@ -65,8 +80,35 @@ export default function ReportsPage() {
         {error ? <p aria-live="polite" className="error-message">{error}</p> : null}
         {isLoading ? <p aria-live="polite" className="report-intro">Loading local reports…</p> : null}
         {records.length ? (
+          <div className="report-filters" role="search">
+            <label>
+              Search reports
+              <input
+                onChange={(event) => setSearchQuery(event.target.value)}
+                placeholder="Role or completion date"
+                type="search"
+                value={searchQuery}
+              />
+            </label>
+            <label>
+              Show
+              <select
+                onChange={(event) => setRecordFilter(event.target.value as typeof recordFilter)}
+                value={recordFilter}
+              >
+                <option value="all">All reports</option>
+                <option value="complete">All questions answered</option>
+                <option value="incomplete">Some questions unanswered</option>
+                <option value="whiteboard">With whiteboard</option>
+              </select>
+            </label>
+          </div>
+        ) : null}
+        {records.length ? (
           <section className="answer-summary">
-            {records.map((record) => (
+            {filteredRecords.map((record) => {
+              const accessibleName = `${record.target_role || "Interview practice"}, ${formatDate(record.completed_at)}`;
+              return (
               <article className="report-record-row" key={record.record_id}>
                 <Link className="report-record-link" href={`/reports/${record.record_id}`}>
                   <div>
@@ -79,6 +121,7 @@ export default function ReportsPage() {
                   {deleteCandidateId === record.record_id ? (
                     <>
                       <button
+                        aria-label={`Confirm deletion of ${accessibleName}`}
                         className="danger-action"
                         disabled={deletingRecordId === record.record_id}
                         onClick={() => void deleteRecord(record.record_id)}
@@ -87,6 +130,7 @@ export default function ReportsPage() {
                         {deletingRecordId === record.record_id ? "Deleting…" : "Confirm delete"}
                       </button>
                       <button
+                        aria-label={`Cancel deletion of ${accessibleName}`}
                         className="secondary-action"
                         disabled={deletingRecordId === record.record_id}
                         onClick={() => setDeleteCandidateId(null)}
@@ -97,6 +141,7 @@ export default function ReportsPage() {
                     </>
                   ) : (
                     <button
+                      aria-label={`Delete ${accessibleName}`}
                       className="text-danger-action"
                       onClick={() => setDeleteCandidateId(record.record_id)}
                       type="button"
@@ -106,7 +151,9 @@ export default function ReportsPage() {
                   )}
                 </div>
               </article>
-            ))}
+              );
+            })}
+            {!filteredRecords.length ? <p aria-live="polite">No reports match these filters.</p> : null}
           </section>
         ) : !error && !isLoading ? <p className="report-intro">No completed interviews yet.</p> : null}
       </section>

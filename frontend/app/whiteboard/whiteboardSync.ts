@@ -4,6 +4,15 @@ export const whiteboardSnapshotStorageKey =
 export const whiteboardPersistenceKey = "ai-interview-simulator.whiteboard";
 export const whiteboardCurrentQuestionStorageKey =
   "ai-interview-simulator.whiteboard-current-question";
+export const whiteboardPendingOperationsStorageKey =
+  "ai-interview-simulator.whiteboard-pending-operations";
+
+export type WhiteboardBounds = {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+};
 
 export type WhiteboardFrame = {
   type: "whiteboard-frame";
@@ -12,6 +21,8 @@ export type WhiteboardFrame = {
   updatedAt: number;
   width: number;
   height: number;
+  visualFingerprint?: number[];
+  bounds?: WhiteboardBounds;
 };
 
 export type WhiteboardCleared = {
@@ -41,7 +52,10 @@ export type AiWhiteboardOperation =
 
 export type ApplyAiWhiteboardOperations = {
   type: "apply-ai-whiteboard-ops";
+  id: string;
   operations: AiWhiteboardOperation[];
+  bounds?: WhiteboardBounds;
+  createdAt: number;
 };
 
 export type WhiteboardCurrentQuestion = {
@@ -57,3 +71,75 @@ export type WhiteboardSyncMessage =
   | WhiteboardResetRequest
   | WhiteboardResetComplete
   | ApplyAiWhiteboardOperations;
+
+const maximumPendingOperationBatches = 20;
+
+export type WhiteboardImageDifference = {
+  changedPixelRatio: number;
+  meanAbsoluteDifference: number;
+};
+
+export function calculateWhiteboardImageDifference(
+  previous: number[] | undefined,
+  current: number[] | undefined,
+): WhiteboardImageDifference | null {
+  if (!previous?.length || previous.length !== current?.length) return null;
+  let changedPixels = 0;
+  let absoluteDifference = 0;
+  for (let index = 0; index < previous.length; index += 1) {
+    const difference = Math.abs(previous[index] - current[index]);
+    absoluteDifference += difference;
+    if (difference >= 12) changedPixels += 1;
+  }
+  return {
+    changedPixelRatio: changedPixels / previous.length,
+    meanAbsoluteDifference: absoluteDifference / (previous.length * 255),
+  };
+}
+
+export function isMaterialWhiteboardDifference(
+  difference: WhiteboardImageDifference | null,
+): boolean {
+  if (!difference) return true;
+  return difference.changedPixelRatio >= 0.004 ||
+    difference.meanAbsoluteDifference >= 0.0015;
+}
+
+export function parsePendingWhiteboardOperations(
+  stored: string | null,
+): ApplyAiWhiteboardOperations[] {
+  if (!stored) return [];
+  try {
+    const value = JSON.parse(stored) as unknown;
+    if (!Array.isArray(value)) return [];
+    return value.filter(
+      (batch): batch is ApplyAiWhiteboardOperations =>
+        Boolean(batch) &&
+        typeof batch === "object" &&
+        (batch as ApplyAiWhiteboardOperations).type === "apply-ai-whiteboard-ops" &&
+        typeof (batch as ApplyAiWhiteboardOperations).id === "string" &&
+        Array.isArray((batch as ApplyAiWhiteboardOperations).operations),
+    );
+  } catch {
+    return [];
+  }
+}
+
+export function appendPendingWhiteboardOperation(
+  stored: string | null,
+  batch: ApplyAiWhiteboardOperations,
+): string {
+  const batches = parsePendingWhiteboardOperations(stored).filter(
+    (item) => item.id !== batch.id,
+  );
+  return JSON.stringify([...batches, batch].slice(-maximumPendingOperationBatches));
+}
+
+export function removePendingWhiteboardOperation(
+  stored: string | null,
+  id: string,
+): string {
+  return JSON.stringify(
+    parsePendingWhiteboardOperations(stored).filter((batch) => batch.id !== id),
+  );
+}

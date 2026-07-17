@@ -9,6 +9,9 @@ from .engine import (
     ControlSignal,
     LiveInterviewerSignal,
     LiveSignalReview,
+    reasoning_depth_requirement,
+    reasoning_depth_satisfies,
+    required_reasoning_depth,
 )
 
 __all__ = [
@@ -22,4 +25,7 @@ __all__ = [
     "ControlSignal",
     "LiveInterviewerSignal",
     "LiveSignalReview",
+    "reasoning_depth_requirement",
+    "reasoning_depth_satisfies",
+    "required_reasoning_depth",
 ]

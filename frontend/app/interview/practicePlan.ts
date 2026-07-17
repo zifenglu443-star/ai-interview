@@ -87,7 +87,7 @@ export const practiceFocusLabels: Record<PracticeFocus, string> = {
 };
 
 export const voiceProviderLabels: Record<VoiceProviderId, string> = {
-  openai: "OpenAI Realtime · Ash (male voice, typed progression)",
+  openai: "OpenAI Realtime · Ash (male voice, Director progression)",
   google: "Google Gemini Live · Charon",
 };
 

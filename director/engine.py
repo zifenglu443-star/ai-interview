@@ -53,8 +53,13 @@ class LiveInterviewerSignal:
     decision: str
     reason: str
     confidence: float
+    answer_status: str = "uncertain"
+    reasoning_depth_achieved: str = "none"
     follow_up_prompt: str | None = None
     candidate_answer: str | None = None
+    question_completion_percentage: int = 0
+    covered_requirements: tuple[str, ...] = field(default_factory=tuple)
+    missing_requirements: tuple[str, ...] = field(default_factory=tuple)
 
 
 @dataclass(frozen=True)
@@ -65,6 +70,10 @@ class LiveSignalReview:
     attitude: str
     pressure: str
     reason_code: str
+    reasoning_depth_achieved: str = "none"
+    question_completion_percentage: int = 0
+    covered_requirements: tuple[str, ...] = field(default_factory=tuple)
+    missing_requirements: tuple[str, ...] = field(default_factory=tuple)
 
 
 @dataclass(frozen=True)
@@ -117,6 +126,57 @@ DEFAULT_QUESTIONS: tuple[InterviewQuestion, ...] = (
 )
 
 
+MAX_FOLLOW_UPS_PER_QUESTION = 3
+
+REASONING_DEPTH_RANK = {
+    "none": 0,
+    "answer": 1,
+    "linked_reasoning": 2,
+    "principled_reasoning": 3,
+}
+
+
+def required_reasoning_depth(config: DirectorConfig) -> str:
+    return {
+        "light": "answer",
+        "standard": "linked_reasoning",
+        "deep": "principled_reasoning",
+    }.get(config.follow_up_depth, "linked_reasoning")
+
+
+def reasoning_depth_satisfies(achieved: str, required: str) -> bool:
+    return REASONING_DEPTH_RANK.get(achieved, 0) >= REASONING_DEPTH_RANK.get(required, 2)
+
+
+def reasoning_depth_requirement(required: str) -> str:
+    return {
+        "answer": "Provide an independent, relevant answer or conclusion for every requested part.",
+        "linked_reasoning": (
+            "Connect the key assumptions, steps, evidence, and conclusion into a coherent chain."
+        ),
+        "principled_reasoning": (
+            "Explain why the key steps work, including governing principles, conditions, or tradeoffs."
+        ),
+    }.get(required, "Connect the key reasoning steps into a coherent chain.")
+
+
+QUESTION_COMPLETION_THRESHOLD = 90
+
+
+def _review_question_completion(
+    signal: LiveInterviewerSignal,
+) -> tuple[int, tuple[str, ...], tuple[str, ...]]:
+    """Bound the model score and keep it consistent with its coverage list."""
+    covered = tuple(item.strip() for item in signal.covered_requirements if item.strip())
+    missing = tuple(item.strip() for item in signal.missing_requirements if item.strip())
+    reported = max(0, min(100, round(signal.question_completion_percentage)))
+    requirement_count = len(covered) + len(missing)
+    if requirement_count:
+        coverage_percentage = round(100 * len(covered) / requirement_count)
+        reported = min(reported, coverage_percentage)
+    return reported, covered, missing
+
+
 class DirectorEngine:
     def __init__(self, questions: tuple[InterviewQuestion, ...] = DEFAULT_QUESTIONS):
         if not questions:
@@ -156,53 +216,16 @@ class DirectorEngine:
         )
 
     def submit_answer(self, session: DirectorSession, answer: str) -> DirectorSession:
+        """Reject legacy unreviewed typed progression.
+
+        Typed input is routed through the live model by the browser when available;
+        otherwise it is retained only as a transcript note.
+        """
         if session.state in {InterviewState.COMPLETED, InterviewState.ENDED}:
             raise DirectorError(f"Cannot submit answer while interview is {session.state}.")
-
-        questions = session.question_plan or self.questions
-        if session.question_index >= len(questions):
-            raise DirectorError("Session question index is outside the question set.")
-
-        clean_answer = answer.strip()
-        question = questions[session.question_index]
-
-        if session.state == InterviewState.ASKING:
-            active_question = InterviewQuestion(
-                id=question.id,
-                prompt=session.current_prompt or question.prompt,
-                focus=session.current_focus or question.focus,
-                follow_up_prompt=(
-                    "Can you make that more specific with a concrete example, "
-                    "tradeoff, or result?"
-                    if session.question_index == 0
-                    else question.follow_up_prompt
-                ),
-            )
-            next_answers = session.answers + (
-                InterviewAnswer(
-                    question_id=active_question.id,
-                    question=active_question.prompt,
-                    answer=clean_answer,
-                ),
-            )
-
-            return self._advance(session, next_answers)
-
-        if session.state == InterviewState.FOLLOW_UP:
-            follow_up_question_id = (
-                session.follow_up_used[-1] if session.follow_up_used else question.id
-            )
-            next_answers = session.answers + (
-                InterviewAnswer(
-                    question_id=follow_up_question_id,
-                    question=session.current_prompt or question.follow_up_prompt,
-                    answer=clean_answer,
-                    kind="follow_up",
-                ),
-            )
-            return self._advance(session, next_answers)
-
-        raise DirectorError(f"Unsupported interview state: {session.state}.")
+        raise DirectorError(
+            "Typed input cannot advance the interview without live semantic review."
+        )
 
     def end(self, session: DirectorSession) -> DirectorSession:
         return DirectorSession(
@@ -228,8 +251,10 @@ class DirectorEngine:
         self,
         session: DirectorSession,
         signal: LiveInterviewerSignal,
+        question_time_expired: bool = False,
+        question_explanation_delivered: bool = False,
     ) -> LiveSignalReview:
-        """Review Gemini's observation without surrendering interview control."""
+        """Review a live provider observation without surrendering interview control."""
         if session.state in {InterviewState.COMPLETED, InterviewState.ENDED}:
             return LiveSignalReview(
                 approved=False,
@@ -252,8 +277,42 @@ class DirectorEngine:
 
         approved_decision = signal.decision
         reason_code = "approved"
+        completion_percentage, covered_requirements, missing_requirements = (
+            _review_question_completion(signal)
+        )
+        required_depth = required_reasoning_depth(session.director_config)
+        depth_satisfied = reasoning_depth_satisfies(
+            signal.reasoning_depth_achieved,
+            required_depth,
+        )
+        if not depth_satisfied:
+            completion_percentage = min(completion_percentage, 85)
+            depth_requirement = reasoning_depth_requirement(required_depth)
+            if depth_requirement not in missing_requirements:
+                missing_requirements = (*missing_requirements, depth_requirement)
 
-        if approved_decision == "move_on" and not (signal.candidate_answer or "").strip():
+        candidate_answer = (signal.candidate_answer or "").strip()
+        if approved_decision == "explain_current" and not question_time_expired:
+            return LiveSignalReview(
+                approved=False,
+                approved_decision="continue",
+                control=session.control,
+                attitude=session.attitude,
+                pressure=session.pressure,
+                reason_code="explanation_requires_expired_question_time",
+            )
+        if approved_decision == "move_on_after_explanation" and not (
+            question_time_expired and question_explanation_delivered
+        ):
+            return LiveSignalReview(
+                approved=False,
+                approved_decision="continue",
+                control=session.control,
+                attitude=session.attitude,
+                pressure=session.pressure,
+                reason_code="question_explanation_not_delivered",
+            )
+        if approved_decision == "move_on" and not candidate_answer:
             return LiveSignalReview(
                 approved=False,
                 approved_decision="continue",
@@ -261,12 +320,110 @@ class DirectorEngine:
                 attitude=session.attitude,
                 pressure=session.pressure,
                 reason_code="move_on_requires_candidate_answer",
+                reasoning_depth_achieved=signal.reasoning_depth_achieved,
             )
+        if approved_decision == "move_on" and signal.answer_status != "substantive":
+            if (signal.follow_up_prompt or "").strip():
+                approved_decision = "follow_up"
+                reason_code = "answer_status_requires_follow_up"
+            else:
+                return LiveSignalReview(
+                    approved=False,
+                    approved_decision="continue",
+                    control=session.control,
+                    attitude="probing",
+                    pressure=session.pressure,
+                    reason_code="answer_status_requires_follow_up",
+                    reasoning_depth_achieved=signal.reasoning_depth_achieved,
+                    question_completion_percentage=completion_percentage,
+                    covered_requirements=covered_requirements,
+                    missing_requirements=missing_requirements,
+                )
+        if approved_decision == "move_on" and not depth_satisfied:
+            if (signal.follow_up_prompt or "").strip():
+                approved_decision = "follow_up"
+                reason_code = "reasoning_depth_requires_follow_up"
+            else:
+                return LiveSignalReview(
+                    approved=False,
+                    approved_decision="continue",
+                    control=session.control,
+                    attitude="probing",
+                    pressure=session.pressure,
+                    reason_code="reasoning_depth_below_requirement",
+                    reasoning_depth_achieved=signal.reasoning_depth_achieved,
+                    question_completion_percentage=completion_percentage,
+                    covered_requirements=covered_requirements,
+                    missing_requirements=missing_requirements,
+                )
+        if approved_decision == "move_on" and (
+            completion_percentage < QUESTION_COMPLETION_THRESHOLD
+            or missing_requirements
+        ):
+            if (signal.follow_up_prompt or "").strip():
+                approved_decision = "follow_up"
+                reason_code = "question_incomplete_requires_follow_up"
+            else:
+                return LiveSignalReview(
+                    approved=False,
+                    approved_decision="continue",
+                    control=session.control,
+                    attitude="probing",
+                    pressure=session.pressure,
+                    reason_code="question_completion_below_threshold",
+                    question_completion_percentage=completion_percentage,
+                    covered_requirements=covered_requirements,
+                    missing_requirements=missing_requirements,
+                )
+        if approved_decision == "follow_up":
+            question = (session.question_plan or self.questions)[session.question_index]
+            follow_up_count = session.follow_up_used.count(question.id)
+            if (
+                completion_percentage >= QUESTION_COMPLETION_THRESHOLD
+                and follow_up_count >= 1
+            ):
+                if (
+                    candidate_answer
+                    and signal.answer_status == "substantive"
+                    and depth_satisfied
+                    and not missing_requirements
+                ):
+                    approved_decision = "move_on"
+                    reason_code = "near_completion_follow_up_limit_reached"
+                else:
+                    return LiveSignalReview(
+                        approved=False,
+                        approved_decision="continue",
+                        control=session.control,
+                        attitude=session.attitude,
+                        pressure=session.pressure,
+                        reason_code="near_completion_follow_up_limit_reached",
+                        reasoning_depth_achieved=signal.reasoning_depth_achieved,
+                        question_completion_percentage=completion_percentage,
+                        covered_requirements=covered_requirements,
+                        missing_requirements=missing_requirements,
+                    )
+            if (
+                approved_decision == "follow_up"
+                and follow_up_count >= MAX_FOLLOW_UPS_PER_QUESTION
+            ):
+                return LiveSignalReview(
+                    approved=False,
+                    approved_decision="continue",
+                    control=session.control,
+                    attitude=session.attitude,
+                    pressure=session.pressure,
+                    reason_code="follow_up_safety_limit_exhausted",
+                    reasoning_depth_achieved=signal.reasoning_depth_achieved,
+                    question_completion_percentage=completion_percentage,
+                    covered_requirements=covered_requirements,
+                    missing_requirements=missing_requirements,
+                )
         if (
-            approved_decision == "move_on"
+            approved_decision in {"move_on", "move_on_after_explanation"}
             and session.answers
             and session.answers[-1].kind == "voice"
-            and session.answers[-1].answer.strip() == (signal.candidate_answer or "").strip()
+            and session.answers[-1].answer.strip() == candidate_answer
         ):
             return LiveSignalReview(
                 approved=False,
@@ -277,12 +434,39 @@ class DirectorEngine:
                 reason_code="duplicate_voice_answer",
             )
 
+        # Style and current pressure affect delivery intensity, not topic or plan.
+        style_adjustment = {
+            "friendly": 0.05,
+            "professional": 0.0,
+            "strict": -0.05,
+        }.get(session.director_config.interviewer_style, 0.0)
+        pressure_adjustment = {
+            "low": 0.05,
+            "medium": 0.0,
+            "high": -0.05,
+        }.get(session.pressure, 0.0)
+
+        challenge_threshold = min(
+            0.95,
+            max(0.65, 0.75 + style_adjustment + pressure_adjustment),
+        )
+        if approved_decision == "challenge" and signal.confidence < challenge_threshold:
+            approved_decision = "continue"
+            reason_code = "challenge_downgraded_for_profile"
+
         # Interruptions carry a higher realism cost, so require stronger evidence.
         interruption_threshold = {
             "low": 0.95,
             "medium": 0.85,
             "high": 0.75,
         }.get(session.director_config.interruption_frequency, 0.85)
+        interruption_threshold = min(
+            0.99,
+            max(
+                0.70,
+                interruption_threshold + style_adjustment + pressure_adjustment,
+            ),
+        )
         if approved_decision == "interrupt" and signal.confidence < interruption_threshold:
             approved_decision = "challenge"
             reason_code = "interrupt_downgraded_to_challenge"
@@ -298,13 +482,11 @@ class DirectorEngine:
             if approved_decision in {"follow_up", "challenge"}
             else "professional"
         )
-        pressure = (
-            "high"
-            if approved_decision == "interrupt"
-            else "medium"
-            if approved_decision in {"follow_up", "challenge"}
-            else session.pressure
-        )
+        pressure = session.pressure
+        if approved_decision == "interrupt":
+            pressure = "high"
+        elif approved_decision in {"follow_up", "challenge"} and pressure == "low":
+            pressure = "medium"
 
         return LiveSignalReview(
             approved=True,
@@ -317,6 +499,10 @@ class DirectorEngine:
             attitude=attitude,
             pressure=pressure,
             reason_code=reason_code,
+            reasoning_depth_achieved=signal.reasoning_depth_achieved,
+            question_completion_percentage=completion_percentage,
+            covered_requirements=covered_requirements,
+            missing_requirements=missing_requirements,
         )
 
     def apply_live_review(
@@ -331,16 +517,18 @@ class DirectorEngine:
             return session
         question = (session.question_plan or self.questions)[session.question_index]
         prompt = (follow_up_prompt or "").strip()
-        if review.approved_decision == "move_on":
+        if review.approved_decision in {"move_on", "move_on_after_explanation"}:
             clean_answer = (candidate_answer or "").strip()
-            if not clean_answer:
+            if not clean_answer and review.approved_decision == "move_on":
                 return session
+            if not clean_answer:
+                clean_answer = "No substantive answer before the question time expired."
             return self._advance(
                 session,
                 session.answers + (
                     InterviewAnswer(
                         question_id=question.id,
-                        question=session.current_prompt or question.prompt,
+                        question=question.prompt,
                         answer=clean_answer,
                         kind="voice",
                     ),
@@ -348,15 +536,15 @@ class DirectorEngine:
             )
         if (
             review.approved_decision == "follow_up"
-            and session.state == InterviewState.ASKING
-            and question.id not in session.follow_up_used
+            and session.state in {InterviewState.ASKING, InterviewState.FOLLOW_UP}
+            and session.follow_up_used.count(question.id) < MAX_FOLLOW_UPS_PER_QUESTION
             and prompt
         ):
             return DirectorSession(
                 state=InterviewState.FOLLOW_UP,
                 question_index=session.question_index,
                 current_prompt=prompt,
-                current_focus="Gemini follow-up",
+                current_focus="Interviewer follow-up",
                 attitude=review.attitude,
                 pressure=review.pressure,
                 control=review.control,
