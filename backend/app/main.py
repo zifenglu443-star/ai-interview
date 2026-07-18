@@ -17,9 +17,9 @@ import httpx
 import truststore
 import websockets
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 
 from director import (
@@ -76,6 +76,20 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def require_public_gateway_token(request: Request, call_next: Any) -> Any:
+    """Reject direct public API traffic when the deployment uses the Sites gateway."""
+    gateway_token = os.environ.get("PUBLIC_GATEWAY_TOKEN", "")
+    if (
+        gateway_token
+        and request.method != "OPTIONS"
+        and request.url.path != "/health"
+        and request.headers.get("x-public-gateway-token") != gateway_token
+    ):
+        return JSONResponse(status_code=403, content={"detail": "Public gateway required."})
+    return await call_next(request)
 
 director_engine = DirectorEngine()
 sessions: dict[str, DirectorSession] = {}
