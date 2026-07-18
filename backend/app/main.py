@@ -55,12 +55,23 @@ app = FastAPI(
     version="0.1.0",
 )
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[
+
+def configured_cors_origins() -> list[str]:
+    """Keep local development working while allowing an explicitly deployed web client."""
+    default_origins = [
         "http://127.0.0.1:3001",
         "http://localhost:3001",
-    ],
+    ]
+    public_origins = [
+        origin.strip().rstrip("/")
+        for origin in os.environ.get("ALLOWED_ORIGINS", "").split(",")
+        if origin.strip()
+    ]
+    return [*dict.fromkeys([*default_origins, *public_origins])]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=configured_cors_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
