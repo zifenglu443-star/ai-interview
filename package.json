@@ -1,7 +1,7 @@
 {
   "name": "ai-interview-simulator",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.1.2",
   "scripts": {
     "dev:frontend": "npm --prefix frontend run dev -- --hostname 127.0.0.1 --port 3001",
     "dev:backend": ".venv/bin/python -m uvicorn backend.app.main:app --reload --host 127.0.0.1 --port 8000",
