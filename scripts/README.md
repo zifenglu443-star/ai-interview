@@ -7,6 +7,9 @@
   same Live session without starting an interview turn.
   it is not part of `npm run verify` and should remain unused while API access is
   intentionally disabled.
+- `launcher_revision.py`: computes the cross-platform source and `.env`
+  fingerprint used by both one-click launchers. It uses only the Python standard
+  library and is included in release archives.
 
 Normal users should not run anything in this directory. Use the root
 `Start AI Interview Simulator.command` launcher.

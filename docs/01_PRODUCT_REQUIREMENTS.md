@@ -10,9 +10,9 @@ controlled interview session with useful feedback—not an open-ended AI chat.
 1. Setup collects target role, practice focus, optional topics/question file,
    reference duration, voice model, and Director settings: interviewer style,
    initial pressure, expected reasoning depth, and interruption frequency.
-   Settings separately stores the optional planning text-model endpoint, key,
-   and model. Browser settings override local environment planner values only
-   while generating a plan.
+   Settings reports backend provider readiness. Provider endpoints, models, and
+   keys are configured only in the server `.env`; browser settings never store
+   or override credentials.
 2. The planning provider allocates time by question difficulty and shows the
    exact plan before the waiting room. Relevant edits invalidate a stale plan.
 3. Waiting room checks readiness before entering the room.
@@ -46,8 +46,8 @@ controlled interview session with useful feedback—not an open-ended AI chat.
 
 ## Current storage
 
-Practice plan, browser-entered provider keys, whiteboard state, and the latest
-report stay in the browser. Completed reports are also archived in the project
-folder. A complete archive becomes visible only after every file is written, and
-history offers a two-step local delete action. The local MVP has no authentication
-or database.
+The non-secret practice plan, whiteboard state, and latest report stay in the
+browser. Provider keys remain in the backend `.env`. Completed reports are also
+archived in the project folder and atomically duplicated under `.backups/`.
+History offers a two-step local delete action. The local MVP has no
+authentication or database.

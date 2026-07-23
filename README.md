@@ -15,11 +15,11 @@
 
 ### 方式二：一键打开源码包
 
-下载并解压仓库后，双击 **Start AI Interview Simulator.command**。第一次启动会自动创建本地配置、安装依赖并构建软件，耗时取决于网络速度；之后启动会快很多。
+下载并解压仓库后，双击 **Start AI Interview Simulator.command**。第一次启动会自动创建本地配置、安装依赖并构建软件，耗时取决于网络速度；之后启动会复用指纹一致的健康进程，代码或 `.env` 变化时会自动重建并重启。
 
 ### Windows 一键打开
 
-下载并解压同一个 ZIP，双击 **Start AI Interview Simulator.bat**。请保留完整文件夹，不要单独移动启动文件。Windows 第一次启动也会自动安装依赖、构建软件并打开浏览器。
+下载并解压同一个 ZIP，双击 **Start AI Interview Simulator.bat**。请保留完整文件夹，不要单独移动启动文件。Windows 第一次启动也会自动安装依赖、构建软件并打开浏览器；代码或 `.env` 变化时会自动重建并重启。
 
 运行要求：
 
@@ -32,14 +32,19 @@
 
 ## 配置与操作
 
-1. 打开软件后进入 **Settings**。
-2. 至少配置一个实时语音服务：OpenAI Realtime 或 Google Gemini Live 的 API Key 与模型名。
-3. 如需自动生成面试计划，再填写 Planning text model 的 HTTPS Endpoint、API Key 和模型名。
+1. 启动软件后打开 **API settings**，至少配置一个实时语音服务：
+   OpenAI Realtime 或 Google Gemini Live。
+2. 如需自动生成面试计划，再在同一页面配置 Planning text model。
+   页面把密钥直接交给本机后端写入 `.env`，不会保存或回填到浏览器。
+3. 也可以手工编辑项目 `.env`；完成后重启启动器并回到
+   **API settings** 检查就绪状态。
 4. 返回 **Setup**，选择岗位、面试重点、时长和难度；可以粘贴题目或主题。
 5. 生成计划后进入候场室，检查摄像头、麦克风，再开始面试。
 6. 面试中可使用语音、文字回答和共享白板；结束后在报告页查看反馈并导出 PDF。
 
-也可以复制 `.env.example` 为 `.env`，在其中配置服务端密钥。`.env` 已被 Git 忽略，严禁把真实密钥上传到 GitHub。
+所有服务密钥只由后端 `.env` 持久化。API settings 表单只把新密钥
+提交给 `127.0.0.1` 上的本机后端，浏览器不会持久化、回填或读取密钥。
+`.env` 已被 Git 忽略，严禁把真实密钥上传到 GitHub。
 
 ## 软件包含什么
 

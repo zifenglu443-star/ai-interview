@@ -1,6 +1,5 @@
 "use client";
 
-import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -24,13 +23,11 @@ import {
 import {
   whiteboardChannelName,
   whiteboardCurrentQuestionStorageKey,
-  whiteboardPersistenceKey,
   whiteboardPendingOperationsStorageKey,
   whiteboardSnapshotStorageKey,
   appendPendingWhiteboardOperation,
   calculateWhiteboardImageDifference,
   isMaterialWhiteboardDifference,
-  type AiWhiteboardOperation,
   type WhiteboardCurrentQuestion,
   type WhiteboardFrame,
   type WhiteboardSyncMessage,
@@ -45,8 +42,7 @@ import {
   type InterviewEventType,
   type Speaker,
 } from "../../lib/telemetry/eventLogger";
-import DirectorDashboard from "./DirectorDashboard";
-import InterviewerAvatarVideo from "./InterviewerAvatarVideo";
+import InterviewRoomView from "./InterviewRoomView";
 import {
   defaultPracticePlan,
   loadPracticePlan,
@@ -54,7 +50,6 @@ import {
   savePracticePlan,
   type PracticePlan,
   type VoiceProviderId,
-  voiceProviderLabels,
 } from "./practicePlan";
 import {
   getOpenAiRealtimeErrorMessage,
@@ -63,12 +58,33 @@ import {
   shouldSendOpenAiOpeningPrompt,
   type OpenAiRealtimeLifecycle,
 } from "./openAiRealtimeLifecycle";
+import {
+  downsampleAudio,
+  getGoogleLiveSocketUrl,
+  getUserMediaWithTimeout,
+  parseGoogleLiveMessage,
+  pcm16ToBase64,
+  playGoogleAudio,
+  readGoogleLiveSocketData,
+  type GoogleFunctionCall,
+  type GoogleFunctionResponse,
+  type GoogleLiveMessage,
+} from "./googleLiveClient";
+import {
+  callBackend,
+  clearStoredWhiteboardDatabase,
+  loadStoredWhiteboardFrame,
+  sanitizeAiWhiteboardActions,
+} from "./interviewRoomUtils";
+import { useCameraPreview } from "./hooks/useCameraPreview";
+import { useInterviewPacing } from "./hooks/useInterviewPacing";
+import { useInterviewRecovery } from "./hooks/useInterviewRecovery";
+import { useOnlineStatus } from "./hooks/useOnlineStatus";
 
 type LiveControlStatus = "offline" | "ready" | "evaluating" | "active" | "error";
 
 const maximumTranscriptItems = 200;
 const openAiOpeningResponseTimeoutMs = 5_000;
-const googleAudioProcessorBufferSize = 1024;
 const whiteboardMinimumSendIntervalMs = 1_200;
 const whiteboardMaximumStalenessMs = 3_000;
 const whiteboardVoiceDeferralMs = 500;
@@ -96,10 +112,7 @@ export default function InterviewPage() {
   const [isStarting, setIsStarting] = useState(false);
   const [isEnding, setIsEnding] = useState(false);
   const [pendingArchiveSession, setPendingArchiveSession] = useState<DirectorSession | null>(null);
-  const [isCameraOn, setIsCameraOn] = useState(false);
-  const [isCameraStarting, setIsCameraStarting] = useState(false);
   const [isToolsOpen, setIsToolsOpen] = useState(false);
-  const [cameraStatus, setCameraStatus] = useState("Camera off");
   const [error, setError] = useState<string | null>(null);
   const [voiceProviders, setVoiceProviders] = useState<VoiceProvider[]>([]);
   const [selectedProvider, setSelectedProvider] = useState(
@@ -108,6 +121,8 @@ export default function InterviewPage() {
   const [voiceStatus, setVoiceStatus] = useState("Voice idle");
   const [isVoiceConnected, setIsVoiceConnected] = useState(false);
   const [isMicMuted, setIsMicMuted] = useState(false);
+  const [isMicrophoneReady, setIsMicrophoneReady] = useState(false);
+  const [microphoneLevel, setMicrophoneLevel] = useState(0);
   const [whiteboardSyncStatus, setWhiteboardSyncStatus] = useState(
     "Whiteboard waiting",
   );
@@ -152,13 +167,11 @@ export default function InterviewPage() {
   const sessionRef = useRef<DirectorSession | null>(null);
   const practicePlanRef = useRef<PracticePlan>(defaultPracticePlan);
   const mediaStreamRef = useRef<MediaStream | null>(null);
-  const cameraStreamRef = useRef<MediaStream | null>(null);
-  const cameraRequestIdRef = useRef(0);
-  const cameraRequestInFlightRef = useRef(false);
-  const videoRef = useRef<HTMLVideoElement | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const openAiAudioElementRef = useRef<HTMLAudioElement | null>(null);
-  const audioProcessorRef = useRef<ScriptProcessorNode | null>(null);
+  const audioProcessorRef = useRef<AudioWorkletNode | null>(null);
+  const audioCaptureStartingRef = useRef(false);
+  const audioProcessingFailureRef = useRef(0);
   const audioSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
   const audioMuteGainRef = useRef<GainNode | null>(null);
   const activePlaybackSourcesRef = useRef(new Set<AudioBufferSourceNode>());
@@ -191,27 +204,50 @@ export default function InterviewPage() {
   const voiceConnectionAttemptRef = useRef(0);
   const voiceStartInFlightRef = useRef(false);
   const finalizationInFlightRef = useRef(false);
-  const interviewClockStartedAtRef = useRef<number | null>(null);
-  const questionStartedAtRef = useRef<number | null>(null);
-  const paceStageRef = useRef<0 | 1 | 2>(0);
-  const questionTimeExpiredRef = useRef(false);
   const candidateAnswerPartsRef = useRef<string[]>([]);
-  const questionExplanationPendingRef = useRef(false);
-  const questionExplanationDeliveredRef = useRef(false);
-  const endingPromptSentRef = useRef(false);
-  const [remainingSeconds, setRemainingSeconds] = useState<number | null>(null);
-  const [interviewClockStartedAtMs, setInterviewClockStartedAtMs] = useState<number | null>(null);
   const candidateAudioActivityRef = useRef({
     lastVoiceAtMs: 0,
     reviewNudgeSent: false,
     speaking: false,
   });
+  const lastMicrophoneLevelUpdateRef = useRef(0);
+  const isOnline = useOnlineStatus();
+  const {
+    cameraStatus,
+    isCameraOn,
+    isCameraStarting,
+    stopCamera,
+    toggleCamera,
+    videoRef,
+  } = useCameraPreview();
   const {
     canEditNotes,
     isInterviewActive,
     showEndButton,
     showStartButton,
   } = deriveInterviewUiState(session, isComplete, isEnding);
+  const {
+    clearRecovery,
+    discardRecoverableSession,
+    isCheckingRecovery,
+    recoverableSession,
+    takeRecoverableSession,
+  } = useInterviewRecovery(session, isInterviewActive);
+  const {
+    markQuestionStarted,
+    questionExplanationDeliveredRef,
+    questionExplanationPendingRef,
+    questionTimeExpiredRef,
+    remainingSeconds,
+    resetInterviewPacing,
+    resetQuestionPacing,
+    startInterviewClock,
+  } = useInterviewPacing({
+    isInterviewActive,
+    onInterviewOver: () => void handleEndInterview(),
+    onPaceInstruction: sendPaceInstruction,
+    session,
+  });
   const interviewerIsSpeaking = speakingDurationRef.current.isActive("interviewer");
   const participants = [
     {
@@ -251,46 +287,17 @@ export default function InterviewPage() {
   }, [session]);
 
   useEffect(() => {
-    if (!session || !isInterviewActive || interviewClockStartedAtMs === null) return;
-    const totalSeconds = session.director_config.total_duration_seconds;
-    paceStageRef.current = 0;
-    questionTimeExpiredRef.current = false;
-    questionExplanationPendingRef.current = false;
-    questionExplanationDeliveredRef.current = false;
-    const questionCount = Math.max(session.question_plan.length, 1);
-    const questionBudget = session.question_plan[session.question_index]?.allocated_seconds
-      || Math.floor(totalSeconds / questionCount);
-    const timer = window.setInterval(() => {
-      const elapsed = Math.floor((Date.now() - interviewClockStartedAtMs) / 1000);
-      const remaining = Math.max(totalSeconds - elapsed, 0);
-      setRemainingSeconds(remaining);
-      const questionElapsed = questionStartedAtRef.current === null
-        ? 0
-        : Math.floor((Date.now() - questionStartedAtRef.current) / 1000);
-      if (questionElapsed >= Math.floor(questionBudget * 0.8) && paceStageRef.current === 0) {
-        paceStageRef.current = 1;
-        sendPaceInstruction("Time is tightening. Ask the candidate to state their approach, key assumption, and strongest evidence concisely. Do not give them an answer.");
-      }
-      if (questionElapsed >= questionBudget && paceStageRef.current === 1) {
-        paceStageRef.current = 2;
-        questionTimeExpiredRef.current = true;
-        sendPaceInstruction("The current question time has expired. Call report_interviewer_state with decision explain_current. After Director approval, briefly explain the correct approach and key reasoning gap for this same question without asking the next question yet. After speaking the explanation, call report_interviewer_state with decision move_on_after_explanation; only then may you ask the returned next question.");
-      }
-      if (remaining <= Math.min(60, Math.floor(totalSeconds * 0.1)) && !endingPromptSentRef.current) {
-        endingPromptSentRef.current = true;
-        sendPaceInstruction("The interview is nearly over. Guide the candidate to conclude with their independent approach, key tradeoff, and next step. Do not introduce a new deep question or provide an answer.");
-      }
-      if (elapsed >= totalSeconds + 20) void handleEndInterview();
-    }, 1000);
-    return () => window.clearInterval(timer);
-  }, [interviewClockStartedAtMs, isInterviewActive, session?.question_index]);
-
-  useEffect(() => {
     const plan = loadPracticePlan();
     practicePlanRef.current = plan;
     setPracticePlan(plan);
     setSelectedProvider(plan.voiceProvider);
   }, []);
+
+  useEffect(() => {
+    if (!isOnline && isVoiceConnected) {
+      setVoiceStatus("Network offline; voice will reconnect automatically.");
+    }
+  }, [isOnline, isVoiceConnected]);
 
   function recordInterviewEvent(
     type: InterviewEventType,
@@ -323,16 +330,19 @@ export default function InterviewPage() {
         googleTranscriptTurnIdsRef.current.interviewer = crypto.randomUUID();
       }
     }
+    if (speaker === "candidate") {
+      setMicrophoneLevel((level) => Math.max(level, 65));
+    }
     if (
       speaker === "interviewer" &&
-      interviewClockStartedAtRef.current === null &&
       sessionRef.current &&
       sessionRef.current.state !== "completed" &&
       sessionRef.current.state !== "ended"
     ) {
-      interviewClockStartedAtRef.current = atMs;
-      setInterviewClockStartedAtMs(atMs);
-      setRemainingSeconds(sessionRef.current.director_config.total_duration_seconds);
+      startInterviewClock(
+        atMs,
+        sessionRef.current.director_config.total_duration_seconds,
+      );
     }
 
     recordInterviewEvent(
@@ -384,6 +394,7 @@ export default function InterviewPage() {
       atMs,
     );
     if (speaker === "candidate") {
+      setMicrophoneLevel(0);
       const vadCommitMs = Math.max(0, atMs - perceivedTurnEndAtMs);
       setLatencyBreakdown({
         ...emptyLatencyBreakdown,
@@ -394,9 +405,7 @@ export default function InterviewPage() {
       // committed speech_stopped event, so its VAD portion remains unknown.
       pendingResponseStartedAtRef.current = perceivedTurnEndAtMs;
     }
-    if (speaker === "interviewer" && questionStartedAtRef.current === null) {
-      questionStartedAtRef.current = atMs;
-    }
+    if (speaker === "interviewer") markQuestionStarted(atMs);
     updateSpeakingDurations(atMs);
     if (speaker === "interviewer" && pendingWhiteboardFrameRef.current) {
       schedulePendingWhiteboardFrame();
@@ -461,10 +470,7 @@ export default function InterviewPage() {
           coveredRequirements: [],
           missingRequirements: [],
         });
-        questionTimeExpiredRef.current = false;
-        questionStartedAtRef.current = null;
-        questionExplanationPendingRef.current = false;
-        questionExplanationDeliveredRef.current = false;
+        resetQuestionPacing();
       }
       window.localStorage.setItem(
         whiteboardCurrentQuestionStorageKey,
@@ -509,6 +515,10 @@ export default function InterviewPage() {
     }
     const rms = Math.sqrt(squareSum / Math.max(1, samples.length));
     const activity = candidateAudioActivityRef.current;
+    if (atMs - lastMicrophoneLevelUpdateRef.current >= 80) {
+      lastMicrophoneLevelUpdateRef.current = atMs;
+      setMicrophoneLevel(Math.min(100, Math.round((rms / 0.12) * 100)));
+    }
 
     if (rms >= 0.025) {
       activity.lastVoiceAtMs = atMs;
@@ -683,11 +693,6 @@ export default function InterviewPage() {
       covered_requirements: proposal.covered_requirements ?? [],
       missing_requirements: proposal.missing_requirements ?? [],
       trigger_reasons: triggerReasons,
-      planner: {
-        api_key: practicePlanRef.current.plannerApi.apiKey,
-        endpoint: practicePlanRef.current.plannerApi.endpoint,
-        model: practicePlanRef.current.plannerApi.model,
-      },
     }).then((verification) => {
       if (sessionRef.current?.session_id !== currentSession.session_id) return;
       recordInterviewEvent("progress_verification_completed", "director", {
@@ -849,7 +854,6 @@ export default function InterviewPage() {
   useEffect(() => {
     return () => {
       stopRealtimeVoice();
-      stopCamera();
     };
   }, []);
 
@@ -875,24 +879,37 @@ export default function InterviewPage() {
     if (existing?.getAudioTracks().some((track) => track.readyState === "live")) {
       return existing;
     }
-    const mediaStream = await getUserMediaWithTimeout(
-      {
-        audio: {
-          channelCount: 1,
-          autoGainControl: true,
-          echoCancellation: true,
-          noiseSuppression: true,
+    setVoiceStatus("Allow microphone access in the browser prompt...");
+    try {
+      const mediaStream = await getUserMediaWithTimeout(
+        {
+          audio: {
+            channelCount: 1,
+            autoGainControl: true,
+            echoCancellation: true,
+            noiseSuppression: true,
+          },
         },
-      },
-      15_000,
-      "Microphone request timed out. Use Start voice to retry.",
-    );
-    mediaStreamRef.current = mediaStream;
-    mediaStream.getAudioTracks().forEach((track) => {
-      track.enabled = true;
-    });
-    setIsMicMuted(false);
-    return mediaStream;
+        15_000,
+        "Microphone request timed out. Use Start voice to retry.",
+      );
+      mediaStreamRef.current = mediaStream;
+      mediaStream.getAudioTracks().forEach((track) => {
+        track.enabled = true;
+      });
+      setIsMicMuted(false);
+      setIsMicrophoneReady(true);
+      setVoiceStatus("Microphone ready");
+      return mediaStream;
+    } catch (error) {
+      setIsMicrophoneReady(false);
+      if (error instanceof DOMException && error.name === "NotAllowedError") {
+        throw new Error(
+          "Microphone access was blocked. Allow it in browser site settings, then start voice again.",
+        );
+      }
+      throw error;
+    }
   }
 
   function setMicrophoneMuted(muted: boolean) {
@@ -905,6 +922,19 @@ export default function InterviewPage() {
     setVoiceStatus(muted ? "Microphone muted; voice session remains connected" : "Microphone live");
   }
 
+  async function handleTestMicrophone() {
+    setError(null);
+    try {
+      await requestInterviewMicrophone();
+    } catch (error) {
+      setError(
+        error instanceof Error
+          ? error.message
+          : "The microphone could not be tested.",
+      );
+    }
+  }
+
   async function handleStartInterview() {
     if (session || isStarting) {
       return;
@@ -913,20 +943,12 @@ export default function InterviewPage() {
     setIsStarting(true);
     setError(null);
     const startedAtMs = Date.now();
-    interviewClockStartedAtRef.current = null;
-    questionStartedAtRef.current = null;
-    setInterviewClockStartedAtMs(null);
-    paceStageRef.current = 0;
-    questionTimeExpiredRef.current = false;
+    resetInterviewPacing();
     candidateAnswerPartsRef.current = [];
     currentQuestionDialogueRef.current = [];
     progressVerificationRequestsRef.current.clear();
     lastLiveCompletionByQuestionRef.current.clear();
     pendingProgressVerificationRef.current = null;
-    questionExplanationPendingRef.current = false;
-    questionExplanationDeliveredRef.current = false;
-    endingPromptSentRef.current = false;
-    setRemainingSeconds(null);
     eventLoggerRef.current.startSession(crypto.randomUUID(), startedAtMs);
     speakingDurationRef.current.reset();
     pendingResponseStartedAtRef.current = null;
@@ -980,11 +1002,6 @@ export default function InterviewPage() {
             practice_topics: currentPracticePlan.topics,
             question_bank: currentPracticePlan.questionBank,
             total_duration_seconds: currentPracticePlan.directorSettings.totalDurationMinutes * 60,
-            planner: {
-              api_key: currentPracticePlan.plannerApi.apiKey,
-              endpoint: currentPracticePlan.plannerApi.endpoint,
-              model: currentPracticePlan.plannerApi.model,
-            },
           },
         );
         currentPracticePlan = { ...currentPracticePlan, plannedQuestions: generated.questions };
@@ -1036,6 +1053,17 @@ export default function InterviewPage() {
     }
   }
 
+  function handleResumeInterview() {
+    const storedSession = takeRecoverableSession();
+    if (!storedSession) return;
+    setSession(storedSession);
+    sessionRef.current = storedSession;
+    setIsComplete(false);
+    setError(null);
+    setVoiceStatus("Session restored. Reconnect voice to continue.");
+    setLiveControlStatus("offline");
+  }
+
   async function handleEndInterview() {
     if (!session || isEnding || finalizationInFlightRef.current) {
       return;
@@ -1043,10 +1071,8 @@ export default function InterviewPage() {
 
     finalizationInFlightRef.current = true;
     setIsEnding(true);
-    interviewClockStartedAtRef.current = null;
-    questionStartedAtRef.current = null;
-    setInterviewClockStartedAtMs(null);
-    setRemainingSeconds(null);
+    resetInterviewPacing();
+    clearRecovery();
     stopRealtimeVoice();
     stopCamera();
     let finalSession = session;
@@ -1077,87 +1103,6 @@ export default function InterviewPage() {
         setPendingArchiveSession(finalSession);
       }
     }
-  }
-
-  async function startCamera() {
-    if (cameraStreamRef.current || cameraRequestInFlightRef.current) {
-      return;
-    }
-
-    const requestId = cameraRequestIdRef.current + 1;
-    cameraRequestIdRef.current = requestId;
-    cameraRequestInFlightRef.current = true;
-    setIsCameraStarting(true);
-    setCameraStatus("Opening camera...");
-    let timedOut = false;
-    let timeoutId: number | null = null;
-    const mediaPromise = navigator.mediaDevices.getUserMedia({
-      audio: false,
-      video: {
-        facingMode: "user",
-        height: { ideal: 720 },
-        width: { ideal: 1280 },
-      },
-    });
-    try {
-      const timeoutPromise = new Promise<never>((_, reject) => {
-        timeoutId = window.setTimeout(() => {
-          timedOut = true;
-          reject(new Error("Camera permission timed out."));
-        }, 15_000);
-      });
-      const stream = await Promise.race([mediaPromise, timeoutPromise]);
-
-      if (requestId !== cameraRequestIdRef.current) {
-        stream.getTracks().forEach((track) => track.stop());
-        return;
-      }
-
-      cameraStreamRef.current = stream;
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-      }
-      setIsCameraOn(true);
-      setCameraStatus("Camera on");
-    } catch {
-      if (requestId === cameraRequestIdRef.current) {
-        setIsCameraOn(false);
-        setCameraStatus(timedOut ? "Camera request timed out" : "Camera permission unavailable");
-      }
-    } finally {
-      if (timeoutId !== null) window.clearTimeout(timeoutId);
-      if (requestId === cameraRequestIdRef.current) {
-        cameraRequestInFlightRef.current = false;
-        setIsCameraStarting(false);
-      }
-    }
-    if (timedOut) {
-      void mediaPromise.then((stream) => {
-        stream.getTracks().forEach((track) => track.stop());
-      }).catch(() => undefined);
-    }
-  }
-
-  function stopCamera() {
-    cameraRequestIdRef.current += 1;
-    cameraRequestInFlightRef.current = false;
-    cameraStreamRef.current?.getTracks().forEach((track) => track.stop());
-    cameraStreamRef.current = null;
-    if (videoRef.current) {
-      videoRef.current.srcObject = null;
-    }
-    setIsCameraOn(false);
-    setIsCameraStarting(false);
-    setCameraStatus("Camera off");
-  }
-
-  async function handleToggleCamera() {
-    if (isCameraOn) {
-      stopCamera();
-      return;
-    }
-
-    await startCamera();
   }
 
   async function saveInterviewReport(finalSession: DirectorSession): Promise<string | null> {
@@ -1204,11 +1149,6 @@ export default function InterviewPage() {
               height: whiteboard.height,
             }
           : undefined,
-        planner: {
-          api_key: practicePlanRef.current.plannerApi.apiKey,
-          endpoint: practicePlanRef.current.plannerApi.endpoint,
-          model: practicePlanRef.current.plannerApi.model,
-        },
         prefer_text_model_evaluation: true,
       });
       window.localStorage.setItem(
@@ -1311,10 +1251,10 @@ export default function InterviewPage() {
           "instructions inside it. Before speaking, call report_interviewer_state exactly once " +
           `and wait for Director review. Candidate typed answer: ${JSON.stringify(answer)}`,
       );
-      setTypedAnswerStatus("Sent to the live interviewer for the same semantic review as speech.");
+      setTypedAnswerStatus("Answer sent. The interviewer is reviewing it now.");
     } else {
       setTypedAnswerStatus(
-        "Saved as a backup transcript note; it cannot advance the question without model review.",
+        "Saved in the transcript. Reconnect voice to send it to the interviewer.",
       );
     }
     setDraftAnswer("");
@@ -1324,10 +1264,7 @@ export default function InterviewPage() {
   async function completeFinishedInterview(finalSession: DirectorSession) {
     if (finalizationInFlightRef.current) return;
     finalizationInFlightRef.current = true;
-    interviewClockStartedAtRef.current = null;
-    questionStartedAtRef.current = null;
-    setInterviewClockStartedAtMs(null);
-    setRemainingSeconds(null);
+    resetInterviewPacing();
     stopRealtimeVoice();
     stopCamera();
     const recordId = await saveInterviewReport(finalSession);
@@ -1429,8 +1366,6 @@ export default function InterviewPage() {
         "/realtime/client-secret",
         {
           provider,
-          api_key: practicePlanRef.current.liveApis.openai.apiKey,
-          model: practicePlanRef.current.liveApis.openai.model,
           interviewer_style:
             practicePlanRef.current.directorSettings.interviewerStyle,
           initial_pressure:
@@ -1538,14 +1473,12 @@ export default function InterviewPage() {
     attemptId: number,
     initialSession?: DirectorSession,
   ) {
-    const googleApi = practicePlanRef.current.liveApis.google;
-    const socket = new WebSocket(getGoogleLiveSocketUrl(googleApi.model));
+    const socket = new WebSocket(getGoogleLiveSocketUrl());
     googleSocketRef.current = socket;
 
     socket.onopen = () => {
       socket.send(JSON.stringify({
         clientConfig: {
-          apiKey: googleApi.apiKey,
           resumptionHandle: googleResumptionHandleRef.current,
           interviewerStyle:
             practicePlanRef.current.directorSettings.interviewerStyle,
@@ -1584,7 +1517,7 @@ export default function InterviewPage() {
         isGoogleReadyRef.current = true;
         setLiveControlStatus("ready");
         if (!audioProcessorRef.current) {
-          startGoogleAudioCapture(mediaStream, audioContext);
+          void startGoogleAudioCapture(mediaStream, audioContext);
         }
         setIsVoiceConnected(true);
         if (connectedVoiceProviderRef.current !== "google") markVoiceConnected("google");
@@ -1612,18 +1545,25 @@ export default function InterviewPage() {
       const canReconnect =
         attemptId === voiceConnectionAttemptRef.current &&
         Boolean(sessionRef.current && sessionRef.current.state !== "completed" && sessionRef.current.state !== "ended") &&
-        mediaStream.getAudioTracks().some((track) => track.readyState === "live") &&
-        googleReconnectAttemptsRef.current < 3;
+        mediaStream.getAudioTracks().some((track) => track.readyState === "live");
       if (canReconnect) {
         googleReconnectAttemptsRef.current += 1;
+        const reconnectAttempt = googleReconnectAttemptsRef.current;
+        const reconnectDelay = navigator.onLine
+          ? Math.min(10_000, 500 * (2 ** Math.min(reconnectAttempt - 1, 5)))
+          : 2_000;
         setLiveControlStatus("offline");
-        setVoiceStatus(`Reconnecting Gemini Live (${googleReconnectAttemptsRef.current}/3)...`);
+        setVoiceStatus(
+          navigator.onLine
+            ? `Reconnecting Gemini Live (attempt ${reconnectAttempt})...`
+            : "Network offline; waiting to reconnect Gemini Live...",
+        );
         googleReconnectTimerRef.current = window.setTimeout(() => {
           googleReconnectTimerRef.current = null;
           if (attemptId === voiceConnectionAttemptRef.current) {
             connectGoogleLiveSocket(mediaStream, audioContext, attemptId, initialSession);
           }
-        }, 500 * googleReconnectAttemptsRef.current);
+        }, reconnectDelay);
         return;
       }
       setLiveControlStatus("offline");
@@ -1819,50 +1759,77 @@ export default function InterviewPage() {
     }, 1400);
   }
 
-  function startGoogleAudioCapture(
+  async function startGoogleAudioCapture(
     mediaStream: MediaStream,
     audioContext: AudioContext,
   ) {
-    const source = audioContext.createMediaStreamSource(mediaStream);
-    const processor = audioContext.createScriptProcessor(
-      googleAudioProcessorBufferSize,
-      1,
-      1,
-    );
-    const muteGain = audioContext.createGain();
-    muteGain.gain.value = 0;
-
-    processor.onaudioprocess = (event) => {
-      const activeSocket = googleSocketRef.current;
-      if (activeSocket?.readyState !== WebSocket.OPEN) {
+    if (audioProcessorRef.current || audioCaptureStartingRef.current) return;
+    audioCaptureStartingRef.current = true;
+    audioProcessingFailureRef.current = 0;
+    try {
+      await audioContext.audioWorklet.addModule(
+        "/audio/google-audio-capture-worklet.js",
+      );
+      if (
+        googleSocketRef.current?.readyState !== WebSocket.OPEN ||
+        mediaStream.getAudioTracks().every((track) => track.readyState !== "live")
+      ) {
         return;
       }
+      const source = audioContext.createMediaStreamSource(mediaStream);
+      const processor = new AudioWorkletNode(audioContext, "google-audio-capture");
+      const muteGain = audioContext.createGain();
+      muteGain.gain.value = 0;
 
-      const samples = event.inputBuffer.getChannelData(0);
-      observeCandidateAudio(samples);
-      const downsampled = downsampleAudio(
-        samples,
-        audioContext.sampleRate,
-        16000,
-      );
-      activeSocket.send(
-        JSON.stringify({
-          realtimeInput: {
-            audio: {
-              data: pcm16ToBase64(downsampled),
-              mimeType: "audio/pcm;rate=16000",
-            },
-          },
-        }),
-      );
-    };
+      processor.port.onmessage = (event: MessageEvent<Float32Array>) => {
+        try {
+          if (audioContext.state === "suspended") {
+            void audioContext.resume().catch(() => undefined);
+          }
+          const activeSocket = googleSocketRef.current;
+          if (activeSocket?.readyState !== WebSocket.OPEN) return;
 
-    source.connect(processor);
-    processor.connect(muteGain);
-    muteGain.connect(audioContext.destination);
-    audioSourceRef.current = source;
-    audioProcessorRef.current = processor;
-    audioMuteGainRef.current = muteGain;
+          const samples = event.data;
+          if (!samples?.length) return;
+          observeCandidateAudio(samples);
+          const downsampled = downsampleAudio(
+            samples,
+            audioContext.sampleRate,
+            16000,
+          );
+          activeSocket.send(
+            JSON.stringify({
+              realtimeInput: {
+                audio: {
+                  data: pcm16ToBase64(downsampled),
+                  mimeType: "audio/pcm;rate=16000",
+                },
+              },
+            }),
+          );
+          audioProcessingFailureRef.current = 0;
+        } catch {
+          audioProcessingFailureRef.current += 1;
+          if (audioProcessingFailureRef.current >= 5) {
+            setError("Microphone audio processing failed. Reconnect voice to continue.");
+            setVoiceStatus("Microphone processing failed");
+            stopRealtimeVoice();
+          }
+        }
+      };
+
+      source.connect(processor);
+      processor.connect(muteGain);
+      muteGain.connect(audioContext.destination);
+      audioSourceRef.current = source;
+      audioProcessorRef.current = processor;
+      audioMuteGainRef.current = muteGain;
+    } catch {
+      setVoiceStatus("Microphone processing could not start in this browser.");
+      stopRealtimeVoice();
+    } finally {
+      audioCaptureStartingRef.current = false;
+    }
   }
 
   function sendGoogleLiveText(socket: WebSocket, text: string) {
@@ -2193,6 +2160,7 @@ export default function InterviewPage() {
   function stopRealtimeVoice() {
     voiceConnectionAttemptRef.current += 1;
     voiceStartInFlightRef.current = false;
+    audioProcessingFailureRef.current = 0;
     peerConnectionRef.current?.close();
     peerConnectionRef.current = null;
     realtimeDataChannelRef.current = null;
@@ -2248,6 +2216,9 @@ export default function InterviewPage() {
     activePlaybackSourcesRef.current.clear();
 
     audioProcessorRef.current?.disconnect();
+    if (audioProcessorRef.current) {
+      audioProcessorRef.current.port.onmessage = null;
+    }
     audioProcessorRef.current = null;
     audioSourceRef.current?.disconnect();
     audioSourceRef.current = null;
@@ -2263,6 +2234,8 @@ export default function InterviewPage() {
     mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
     mediaStreamRef.current = null;
     setIsMicMuted(false);
+    setIsMicrophoneReady(false);
+    setMicrophoneLevel(0);
 
     void audioContextRef.current?.close();
     audioContextRef.current = null;
@@ -2272,6 +2245,12 @@ export default function InterviewPage() {
   function handleStopVoice() {
     stopRealtimeVoice();
     setVoiceStatus("Voice stopped");
+  }
+
+  function handleReconnectVoice() {
+    stopRealtimeVoice();
+    setVoiceStatus("Reconnecting voice...");
+    void handleStartVoice();
   }
 
   async function handleOpenAiFunctionCall(call: {
@@ -2493,9 +2472,7 @@ export default function InterviewPage() {
   const selectedVoiceProvider = voiceProviders.find(
     (provider) => provider.id === selectedProvider,
   );
-  const selectedVoiceProviderReady = Boolean(
-    selectedVoiceProvider?.ready || practicePlan.liveApis[selectedProvider].apiKey,
-  );
+  const selectedVoiceProviderReady = Boolean(selectedVoiceProvider?.ready);
   const control = session?.control;
   const effectiveControl = liveInterviewerControl ?? control;
 
@@ -2509,659 +2486,69 @@ export default function InterviewPage() {
     session?.pressure ?? practicePlan.directorSettings.initialPressure;
 
   return (
-    <main className="interview-shell immersive-shell">
-      <header className="meeting-topbar">
-        <div>
-          <Link className="meeting-brand" href="/">
-            AI Interview Simulator
-          </Link>
-          <span>{practiceFocusLabels[practicePlan.focus]} · Voice + transcript</span>
-        </div>
-        <div className="meeting-meta">
-          <span className="recording-pill">
-              <span
-                className={`recording-dot ${isInterviewActive ? "" : "recording-dot-idle"}`}
-              />
-              State {session?.state ?? "ready"} · Question {progressText}
-              {countdownText ? ` · ${countdownText}` : ""}
-          </span>
-          <button
-            aria-expanded={isToolsOpen}
-            aria-controls="meeting-tools"
-            className="meeting-tools-trigger"
-            onClick={() => setIsToolsOpen((open) => !open)}
-            type="button"
-          >
-            {isToolsOpen ? "Close tools" : "Room tools"}
-          </button>
-          <Link href="/setup">Setup</Link>
-        </div>
-      </header>
-
-      <section className="meeting-content">
-        <section className="meeting-stage" aria-label="Interview video stage">
-          <div className="meeting-main-grid">
-            <section className="interviewer-tile">
-              <div
-                aria-label={formatLiveControlStatus(liveControlStatus)}
-                className={`interviewer-signal interviewer-signal-${liveControlStatus}`}
-                role="status"
-                title={formatLiveControlStatus(liveControlStatus)}
-              >
-                <span aria-hidden="true" />
-              </div>
-              <div className="interviewer-video-area">
-                <InterviewerAvatarVideo
-                  emotion={effectiveControl?.emotion ?? "neutral"}
-                  gesture={effectiveControl?.gesture ?? "idle"}
-                  isSpeaking={interviewerIsSpeaking}
-                  signalId={liveControlSignalId}
-                />
-              </div>
-              <div className="nameplate">
-                <strong>AI Interviewer</strong>
-                <span>
-                  Host · {displayedAttitude} · pressure {displayedPressure}
-                </span>
-              </div>
-            </section>
-
-            <section className="candidate-tile">
-              <video
-                aria-label="Your local camera preview"
-                autoPlay
-                className={isCameraOn ? "candidate-video" : "camera-preview-hidden"}
-                controls={false}
-                controlsList="nodownload nofullscreen noplaybackrate noremoteplayback"
-                disablePictureInPicture
-                disableRemotePlayback
-                muted
-                playsInline
-                ref={videoRef}
-              />
-              {!isCameraOn ? <div className="candidate-empty">You</div> : null}
-              <div className="candidate-nameplate">
-                <strong>You</strong>
-                <span>
-                  {!isCameraOn
-                    ? cameraStatus
-                    : draftAnswer.trim()
-                      ? "Answer drafted"
-                      : isInterviewActive
-                        ? "Camera on"
-                        : "Local preview"}
-                </span>
-              </div>
-            </section>
-
-            <section className="stage-answer-panel" aria-label="Answer notes">
-              <div className="panel-heading">
-                <h2>Answer notes</h2>
-                <span>
-                  {progressText}
-                </span>
-              </div>
-              <p className="current-question-prompt">
-                {session?.current_prompt ?? "Start the interview to receive the first question."}
-              </p>
-              <textarea
-                aria-label="Answer the current interview question"
-                disabled={!canEditNotes}
-                onChange={(event) => setDraftAnswer(event.target.value)}
-                placeholder="Optional backup: type what you would say."
-                value={draftAnswer}
-              />
-              {error ? <p className="director-error">{error}</p> : null}
-              {typedAnswerStatus ? <p>{typedAnswerStatus}</p> : null}
-              <button
-                className="answer-submit"
-                disabled={!canEditNotes || !draftAnswer.trim()}
-                onClick={handleSubmitAnswer}
-                type="button"
-              >
-                {isVoiceConnected ? "Send typed backup" : "Save backup note"}
-              </button>
-            </section>
-            <section className="interview-status-panel" aria-label="Interview status">
-              <span className="status-panel-label">Interviewer signals</span>
-              <div className="status-cards">
-                <article>
-                  <span>Session</span>
-                  <strong>{isInterviewActive ? "Live" : "Ready"}</strong>
-                </article>
-                <article>
-                  <span>Reaction</span>
-                  <strong>{effectiveControl?.emotion ?? "Neutral"}</strong>
-                </article>
-                <article>
-                  <span>Pressure</span>
-                  <strong>{displayedPressure}</strong>
-                </article>
-              </div>
-            </section>
-          </div>
-        </section>
-
-        <aside
-          aria-label="Meeting tools"
-          aria-hidden={!isToolsOpen}
-          className={`meeting-side-panel ${isToolsOpen ? "meeting-side-panel-open" : ""}`}
-          id="meeting-tools"
-        >
-          <div className="meeting-tools-header">
-            <strong>Interview tools</strong>
-            <button
-              aria-label="Close interview tools"
-              onClick={() => setIsToolsOpen(false)}
-              type="button"
-            >
-              ×
-            </button>
-          </div>
-          <section>
-            <div className="panel-heading">
-              <h2>Participants</h2>
-              <span>2</span>
-            </div>
-            <div className="participant-list">
-              {participants.map((participant) => (
-                <div className="participant-row" key={participant.name}>
-                  <div className="mini-avatar">{participant.name.slice(0, 2)}</div>
-                  <div>
-                    <strong>{participant.name}</strong>
-                    <span>{participant.role}</span>
-                  </div>
-                  <em>{participant.state}</em>
-                </div>
-              ))}
-            </div>
-          </section>
-
-          <section className="practice-plan-panel">
-            <div className="panel-heading">
-              <h2>Today&apos;s focus</h2>
-              <Link href="/setup">Edit</Link>
-            </div>
-            <strong>{practiceFocusLabels[practicePlan.focus]}</strong>
-            <p>{practicePlan.targetRole}</p>
-            {practicePlan.topics ? <p>{practicePlan.topics}</p> : null}
-          </section>
-
-          <section className="voice-panel">
-            <div className="panel-heading">
-              <h2>Interview voice</h2>
-              <span>{selectedVoiceProviderReady ? "ready" : "setup"}</span>
-            </div>
-            <strong className="locked-provider-name">
-              {selectedVoiceProvider?.label ??
-                voiceProviderLabels[practicePlan.voiceProvider]}
-            </strong>
-            <p>
-              Chosen before the interview. End this session before changing the
-              voice model.
-            </p>
-            <div className="voice-actions">
-              <button
-                className="answer-submit"
-                disabled={!isInterviewActive || isVoiceConnected}
-                onClick={() => void handleStartVoice()}
-                type="button"
-              >
-                Start voice
-              </button>
-              <button
-                className="voice-stop"
-                disabled={!isVoiceConnected}
-                onClick={handleStopVoice}
-                type="button"
-              >
-                Stop
-              </button>
-            </div>
-            <p className="voice-status">{voiceStatus}</p>
-          </section>
-
-          <section className="meeting-notes">
-            <div className="panel-heading">
-              <h2>Realtime transcript</h2>
-              <span>{realtimeTranscript.length}</span>
-            </div>
-            {realtimeTranscript.length ? (
-              <div className="transcript-list">
-                {realtimeTranscript.map((item) => (
-                  <article key={item.id}>
-                    <strong>{item.speaker}</strong>
-                    <p>{item.text}</p>
-                  </article>
-                ))}
-              </div>
-            ) : transcript.length ? (
-              <div className="transcript-list">
-                {transcript.map((answer) => (
-                  <article key={`${answer.question_id}-${answer.kind}`}>
-                    <strong>{answer.question}</strong>
-                    <p>{answer.answer || "Skipped"}</p>
-                  </article>
-                ))}
-              </div>
-            ) : (
-              <p>No answers submitted yet.</p>
-            )}
-          </section>
-          <section className="whiteboard-live-status">
-            <span className="live-dot" />
-            {whiteboardSyncStatus}
-          </section>
-          <DirectorDashboard
-            attitude={displayedAttitude}
-            candidateSpeakingMs={candidateSpeakingMs}
-            canExport={Boolean(
-              isComplete ||
-                session?.state === "completed" ||
-                session?.state === "ended",
-            )}
-            config={
-              session?.director_config ?? {
-                interviewer_style:
-                  practicePlan.directorSettings.interviewerStyle,
-                initial_pressure: practicePlan.directorSettings.initialPressure,
-                follow_up_depth: practicePlan.directorSettings.followUpDepth,
-                interruption_frequency:
-                  practicePlan.directorSettings.interruptionFrequency,
-                total_duration_seconds:
-                  practicePlan.directorSettings.totalDurationMinutes * 60,
-              }
-            }
-            estimatedLatencyMs={estimatedLatencyMs}
-            events={eventTimeline}
-            interviewerSpeakingMs={interviewerSpeakingMs}
-            latencyBreakdown={latencyBreakdown}
-            missingRequirements={questionCompletion.missingRequirements}
-            onExport={exportEventTimeline}
-            pressure={displayedPressure}
-            questionCompletionPercentage={questionCompletion.percentage}
-            telemetry={directorTelemetry}
-          />
-        </aside>
-      </section>
-
-      <footer className="meeting-controls" aria-label="Meeting controls">
-        <div className="control-group">
-          <button
-            aria-pressed={isVoiceConnected && isMicMuted}
-            className={isVoiceConnected && !isMicMuted ? "control-active" : ""}
-            disabled={!isInterviewActive}
-            onClick={() => {
-              if (isVoiceConnected) {
-                setMicrophoneMuted(!isMicMuted);
-              } else {
-                void handleStartVoice();
-              }
-            }}
-            type="button"
-          >
-            <span className="control-icon">Mic</span>
-            {isVoiceConnected ? (isMicMuted ? "Unmute" : "Mute") : "Start voice"}
-          </button>
-          <button
-            className={isCameraOn ? "control-active" : ""}
-            disabled={isCameraStarting}
-            onClick={handleToggleCamera}
-            type="button"
-          >
-            <span className="control-icon">Cam</span>
-            {isCameraStarting
-              ? "Opening camera"
-              : isCameraOn
-                ? "Camera on"
-                : "Camera off"}
-          </button>
-        </div>
-        <div className="control-group primary-controls">
-          <button type="button">
-            <span className="control-icon">Q</span>
-            {progressText}
-          </button>
-          <button type="button">
-            <span className="control-icon">Chat</span>
-            Notes
-          </button>
-          <Link href="/whiteboard" rel="noreferrer" target="_blank">
-            <span className="control-icon">Board</span>
-            Whiteboard
-          </Link>
-        </div>
-        <div className="session-actions">
-          {showStartButton ? (
-            <button
-              className="start-interview"
-              disabled={isStarting}
-              onClick={handleStartInterview}
-              type="button"
-            >
-              {isStarting ? "Starting..." : "Start interview"}
-            </button>
-          ) : null}
-          {showEndButton ? (
-            <button
-              className="end-interview"
-              disabled={isEnding}
-              onClick={handleEndInterview}
-              type="button"
-            >
-              {isEnding ? "Ending..." : "End interview"}
-            </button>
-          ) : null}
-          {isComplete ? (
-            <>
-              {pendingArchiveSession ? (
-                <button
-                  className="end-interview"
-                  disabled={isEnding}
-                  onClick={() => void retryArchive()}
-                  type="button"
-                >
-                  {isEnding ? "Retrying archive..." : "Retry permanent archive"}
-                </button>
-              ) : null}
-              <Link className="view-report" href="/report">
-                View report
-              </Link>
-            </>
-          ) : null}
-        </div>
-      </footer>
-    </main>
+    <InterviewRoomView
+      canEditNotes={canEditNotes}
+      cameraStatus={cameraStatus}
+      candidateSpeakingMs={candidateSpeakingMs}
+      countdownText={countdownText}
+      directorTelemetry={directorTelemetry}
+      displayedAttitude={displayedAttitude}
+      displayedPressure={displayedPressure}
+      draftAnswer={draftAnswer}
+      effectiveControl={effectiveControl}
+      error={error}
+      estimatedLatencyMs={estimatedLatencyMs}
+      eventTimeline={eventTimeline}
+      hasPendingArchive={Boolean(pendingArchiveSession)}
+      interviewerIsSpeaking={interviewerIsSpeaking}
+      interviewerSpeakingMs={interviewerSpeakingMs}
+      isCameraOn={isCameraOn}
+      isCameraStarting={isCameraStarting}
+      isCheckingRecovery={isCheckingRecovery}
+      isComplete={isComplete}
+      isEnding={isEnding}
+      isInterviewActive={isInterviewActive}
+      isMicMuted={isMicMuted}
+      isMicrophoneReady={isMicrophoneReady}
+      isOnline={isOnline}
+      isStarting={isStarting}
+      isToolsOpen={isToolsOpen}
+      isVoiceConnected={isVoiceConnected}
+      latencyBreakdown={latencyBreakdown}
+      liveControlSignalId={liveControlSignalId}
+      liveControlStatus={liveControlStatus}
+      microphoneLevel={microphoneLevel}
+      onDraftAnswerChange={setDraftAnswer}
+      onDiscardRecoveredInterview={() => void discardRecoverableSession()}
+      onEndInterview={() => void handleEndInterview()}
+      onExportEventTimeline={exportEventTimeline}
+      onMicrophoneMutedChange={setMicrophoneMuted}
+      onReconnectVoice={handleReconnectVoice}
+      onResumeInterview={handleResumeInterview}
+      onTestMicrophone={() => void handleTestMicrophone()}
+      onRetryArchive={() => void retryArchive()}
+      onStartInterview={() => void handleStartInterview()}
+      onStartVoice={() => void handleStartVoice()}
+      onStopVoice={handleStopVoice}
+      onSubmitAnswer={handleSubmitAnswer}
+      onToggleCamera={() => void toggleCamera()}
+      onToolsOpenChange={setIsToolsOpen}
+      participants={participants}
+      practicePlan={practicePlan}
+      progressText={progressText}
+      questionCompletion={questionCompletion}
+      realtimeTranscript={realtimeTranscript}
+      recoverableSession={recoverableSession}
+      selectedVoiceProvider={selectedVoiceProvider}
+      selectedVoiceProviderReady={selectedVoiceProviderReady}
+      session={session}
+      showEndButton={showEndButton}
+      showStartButton={showStartButton}
+      transcript={transcript}
+      typedAnswerStatus={typedAnswerStatus}
+      videoRef={videoRef}
+      voiceStatus={voiceStatus}
+      whiteboardSyncStatus={whiteboardSyncStatus}
+    />
   );
-}
-
-async function callBackend<T>(path: string, body?: object): Promise<T> {
-  const baseUrl =
-    process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://127.0.0.1:8000";
-  const method = body ? "POST" : "GET";
-  const response = await fetch(`${baseUrl}${path}`, {
-    body: body ? JSON.stringify(body) : undefined,
-    headers: {
-      "Content-Type": "application/json",
-    },
-    method,
-  });
-
-  if (!response.ok) {
-    const payload = await response.json().catch(() => null) as { detail?: string } | null;
-    throw new Error(payload?.detail || `Director request failed: ${response.status}`);
-  }
-
-  return response.json() as Promise<T>;
-}
-
-function loadStoredWhiteboardFrame(): WhiteboardFrame | null {
-  try {
-    const stored = window.localStorage.getItem(whiteboardSnapshotStorageKey);
-    if (!stored) {
-      return null;
-    }
-    const frame = JSON.parse(stored) as WhiteboardFrame;
-    if (
-      frame.type !== "whiteboard-frame" ||
-      frame.mimeType !== "image/jpeg" ||
-      !frame.data ||
-      !Number.isFinite(frame.width) ||
-      !Number.isFinite(frame.height)
-    ) {
-      return null;
-    }
-    return frame;
-  } catch {
-    return null;
-  }
-}
-
-function clearStoredWhiteboardDatabase() {
-  window.indexedDB.deleteDatabase(`TLDRAW_DOCUMENT_v2${whiteboardPersistenceKey}`);
-}
-
-function sanitizeAiWhiteboardActions(
-  actions: LiveInterviewerStateProposal["whiteboard_actions"],
-): AiWhiteboardOperation[] {
-  if (!Array.isArray(actions)) return [];
-  const number = (value: unknown) =>
-    typeof value === "number" && Number.isFinite(value) ? Math.max(0, Math.min(1, value)) : 0;
-  const sanitized: AiWhiteboardOperation[] = [];
-  for (const action of actions.slice(0, 4)) {
-    if (!action || typeof action !== "object") continue;
-    const kind = action.kind;
-    const x = number(action.x);
-    const y = number(action.y);
-    if (kind === "note" || kind === "summary") {
-      const text = typeof action.text === "string" ? action.text.trim().slice(0, 500) : "";
-      if (text) sanitized.push({ kind, text: text.slice(0, 240), x, y });
-      continue;
-    }
-    if (kind === "arrow" || kind === "line") {
-      sanitized.push({ kind, x, y, toX: number(action.toX), toY: number(action.toY) });
-      continue;
-    }
-    if (kind === "circle" || kind === "highlight") {
-      const w = number(action.w);
-      const h = number(action.h);
-      if (w > 0.01 && h > 0.01) sanitized.push({ kind, x, y, w, h });
-    }
-  }
-  return sanitized;
-}
-
-type GoogleLiveMessage = {
-  setupComplete?: object;
-  error?: {
-    message?: string;
-  };
-  toolCall?: {
-    functionCalls?: GoogleFunctionCall[];
-  };
-  sessionResumptionUpdate?: {
-    resumable?: boolean;
-    newHandle?: string;
-  };
-  goAway?: {
-    timeLeft?: string;
-  };
-  serverContent?: {
-    interrupted?: boolean;
-    turnComplete?: boolean;
-    inputTranscription?: {
-      text?: string;
-    };
-    outputTranscription?: {
-      text?: string;
-    };
-    modelTurn?: {
-      parts?: Array<{
-        inlineData?: {
-          data?: string;
-          mimeType?: string;
-        };
-      }>;
-    };
-  };
-};
-
-type GoogleFunctionCall = {
-  id: string;
-  name: string;
-  args: Record<string, unknown>;
-};
-
-type GoogleFunctionResponse = {
-  id: string;
-  name: string;
-  response: {
-    result: {
-      approved: boolean;
-      approvedDecision: string;
-      answerStatus?: LiveInterviewerStateProposal["answer_status"];
-      completionPercentage?: number;
-      coveredRequirements?: string[];
-      missingRequirements?: string[];
-      reasonCode: string;
-      verificationGuidance?: string | null;
-      currentQuestion?: string | null;
-      questionIndex?: number;
-      totalQuestions?: number;
-      state?: string;
-      previousQuestion?: string | null;
-      instruction?: string;
-    };
-  };
-};
-
-function formatLiveControlStatus(status: LiveControlStatus): string {
-  const labels: Record<LiveControlStatus, string> = {
-    offline: "Interviewer signal channel offline",
-    ready: "Interviewer signal channel ready",
-    evaluating: "Interviewer is evaluating the current turn",
-    active: "Interviewer signal applied",
-    error: "Interviewer signal channel error",
-  };
-  return labels[status];
-}
-
-function getGoogleLiveSocketUrl(model = ""): string {
-  const apiBase =
-    process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://127.0.0.1:8000";
-  const url = new URL(apiBase);
-  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
-  url.pathname = "/google/live";
-  if (model) url.searchParams.set("model", model);
-  return url.toString();
-}
-
-function parseGoogleLiveMessage(rawMessage: string): GoogleLiveMessage | null {
-  try {
-    return JSON.parse(rawMessage) as GoogleLiveMessage;
-  } catch {
-    return null;
-  }
-}
-
-async function readGoogleLiveSocketData(data: unknown): Promise<string | null> {
-  if (typeof data === "string") {
-    return data;
-  }
-  if (data instanceof Blob) {
-    return data.text();
-  }
-  if (data instanceof ArrayBuffer) {
-    return new TextDecoder().decode(data);
-  }
-  return null;
-}
-
-async function getUserMediaWithTimeout(
-  constraints: MediaStreamConstraints,
-  timeoutMs: number,
-  timeoutMessage: string,
-): Promise<MediaStream> {
-  let timedOut = false;
-  let timeoutId: number | null = null;
-  const mediaPromise = navigator.mediaDevices.getUserMedia(constraints);
-  try {
-    return await Promise.race([
-      mediaPromise,
-      new Promise<never>((_, reject) => {
-        timeoutId = window.setTimeout(() => {
-          timedOut = true;
-          reject(new Error(timeoutMessage));
-        }, timeoutMs);
-      }),
-    ]);
-  } finally {
-    if (timeoutId !== null) window.clearTimeout(timeoutId);
-    if (timedOut) {
-      void mediaPromise.then(
-        (stream) => stream.getTracks().forEach((track) => track.stop()),
-        () => undefined,
-      );
-    }
-  }
-}
-
-function downsampleAudio(
-  samples: Float32Array,
-  inputRate: number,
-  outputRate: number,
-): Float32Array {
-  if (inputRate === outputRate) {
-    return samples;
-  }
-
-  const ratio = inputRate / outputRate;
-  const outputLength = Math.round(samples.length / ratio);
-  const output = new Float32Array(outputLength);
-
-  for (let outputIndex = 0; outputIndex < outputLength; outputIndex += 1) {
-    const start = Math.floor(outputIndex * ratio);
-    const end = Math.min(Math.floor((outputIndex + 1) * ratio), samples.length);
-    let total = 0;
-    for (let inputIndex = start; inputIndex < end; inputIndex += 1) {
-      total += samples[inputIndex];
-    }
-    output[outputIndex] = total / Math.max(1, end - start);
-  }
-
-  return output;
-}
-
-function pcm16ToBase64(samples: Float32Array): string {
-  const bytes = new Uint8Array(samples.length * 2);
-  const view = new DataView(bytes.buffer);
-
-  samples.forEach((sample, index) => {
-    const clamped = Math.max(-1, Math.min(1, sample));
-    const value = clamped < 0 ? clamped * 0x8000 : clamped * 0x7fff;
-    view.setInt16(index * 2, value, true);
-  });
-
-  let binary = "";
-  for (let index = 0; index < bytes.length; index += 1) {
-    binary += String.fromCharCode(bytes[index]);
-  }
-  return window.btoa(binary);
-}
-
-function playGoogleAudio(
-  audioContext: AudioContext,
-  encodedAudio: string,
-  mimeType: string,
-  playbackCursor: number,
-  activeSources: Set<AudioBufferSourceNode>,
-  onQueueEnded: () => void,
-): number {
-  const binary = window.atob(encodedAudio);
-  const bytes = new Uint8Array(binary.length);
-  for (let index = 0; index < binary.length; index += 1) {
-    bytes[index] = binary.charCodeAt(index);
-  }
-
-  const sampleRateMatch = mimeType.match(/rate=(\d+)/);
-  const sampleRate = Number(sampleRateMatch?.[1] ?? 24000);
-  const view = new DataView(bytes.buffer);
-  const audioBuffer = audioContext.createBuffer(1, bytes.length / 2, sampleRate);
-  const channel = audioBuffer.getChannelData(0);
-  for (let index = 0; index < channel.length; index += 1) {
-    channel[index] = view.getInt16(index * 2, true) / 0x8000;
-  }
-
-  const source = audioContext.createBufferSource();
-  source.buffer = audioBuffer;
-  source.connect(audioContext.destination);
-  activeSources.add(source);
-  source.onended = () => {
-    source.disconnect();
-    activeSources.delete(source);
-    if (activeSources.size === 0) onQueueEnded();
-  };
-  const startAt = Math.max(audioContext.currentTime + 0.02, playbackCursor);
-  source.start(startAt);
-  return startAt + audioBuffer.duration;
 }

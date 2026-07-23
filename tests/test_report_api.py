@@ -50,11 +50,6 @@ def test_report_evaluate_marks_empty_evidence_without_calling_text_model(monkeyp
                 {"question_id": "q2", "question": "Second?", "answer": "   "},
             ],
             "prefer_text_model": True,
-            "planner": {
-                "api_key": "configured-key",
-                "endpoint": "https://planner.example/chat/completions",
-                "model": "existing-text-model",
-            },
         },
     )
 
@@ -95,6 +90,12 @@ def test_report_evaluate_uses_existing_text_model_as_final_quality_rater(monkeyp
         return MockResponse()
 
     monkeypatch.setattr(main.httpx, "post", fake_post)
+    monkeypatch.setenv("PLANNER_API_KEY", "configured-key")
+    monkeypatch.setenv(
+        "PLANNER_API_ENDPOINT",
+        "https://planner.example/chat/completions",
+    )
+    monkeypatch.setenv("PLANNER_MODEL", "existing-text-model")
     response = client.post(
         "/report/evaluate",
         json={
@@ -105,11 +106,6 @@ def test_report_evaluate_uses_existing_text_model_as_final_quality_rater(monkeyp
                 "answer": "I compared latency and consistency, then validated the choice with data.",
             }],
             "prefer_text_model": True,
-            "planner": {
-                "api_key": "configured-key",
-                "endpoint": "https://planner.example/chat/completions",
-                "model": "existing-text-model",
-            },
         },
     )
 

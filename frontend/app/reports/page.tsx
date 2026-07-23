@@ -2,15 +2,13 @@
 
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
-
-type InterviewRecordSummary = {
-  record_id: string;
-  completed_at: string;
-  target_role: string;
-  answered_questions: number;
-  total_questions: number;
-  has_whiteboard: boolean;
-};
+import AppNav from "../components/AppNav";
+import {
+  filterAndSortRecords,
+  type InterviewRecordSummary,
+  type RecordFilter,
+  type RecordSort,
+} from "./reportHistory";
 
 export default function ReportsPage() {
   const [records, setRecords] = useState<InterviewRecordSummary[]>([]);
@@ -19,7 +17,8 @@ export default function ReportsPage() {
   const [deleteCandidateId, setDeleteCandidateId] = useState<string | null>(null);
   const [deletingRecordId, setDeletingRecordId] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
-  const [recordFilter, setRecordFilter] = useState<"all" | "complete" | "incomplete" | "whiteboard">("all");
+  const [recordFilter, setRecordFilter] = useState<RecordFilter>("all");
+  const [recordSort, setRecordSort] = useState<RecordSort>("newest");
   const apiBase = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://127.0.0.1:8000";
 
   useEffect(() => {
@@ -34,17 +33,14 @@ export default function ReportsPage() {
   }, [apiBase]);
 
   const filteredRecords = useMemo(() => {
-    const query = searchQuery.trim().toLocaleLowerCase();
-    return records.filter((record) => {
-      const matchesQuery = !query || [record.target_role, formatDate(record.completed_at)]
-        .some((value) => value.toLocaleLowerCase().includes(query));
-      const matchesFilter = recordFilter === "all"
-        || (recordFilter === "complete" && record.answered_questions >= record.total_questions)
-        || (recordFilter === "incomplete" && record.answered_questions < record.total_questions)
-        || (recordFilter === "whiteboard" && record.has_whiteboard);
-      return matchesQuery && matchesFilter;
-    });
-  }, [recordFilter, records, searchQuery]);
+    return filterAndSortRecords(
+      records,
+      searchQuery,
+      recordFilter,
+      recordSort,
+      formatDate,
+    );
+  }, [recordFilter, recordSort, records, searchQuery]);
 
   async function deleteRecord(recordId: string) {
     setDeletingRecordId(recordId);
@@ -66,11 +62,7 @@ export default function ReportsPage() {
 
   return (
     <main className="page-shell">
-      <nav className="topbar" aria-label="Reports navigation">
-        <Link href="/">AI Interview Simulator</Link>
-        <Link href="/setup">New interview</Link>
-        <Link href="/settings">API settings</Link>
-      </nav>
+      <AppNav />
       <section className="report-layout">
         <div>
           <p className="eyebrow">Interview history</p>
@@ -100,6 +92,18 @@ export default function ReportsPage() {
                 <option value="complete">All questions answered</option>
                 <option value="incomplete">Some questions unanswered</option>
                 <option value="whiteboard">With whiteboard</option>
+              </select>
+            </label>
+            <label>
+              Sort
+              <select
+                onChange={(event) => setRecordSort(event.target.value as RecordSort)}
+                value={recordSort}
+              >
+                <option value="newest">Newest first</option>
+                <option value="oldest">Oldest first</option>
+                <option value="role">Role A-Z</option>
+                <option value="completion">Most complete</option>
               </select>
             </label>
           </div>

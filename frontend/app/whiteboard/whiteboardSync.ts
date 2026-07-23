@@ -73,11 +73,35 @@ export type WhiteboardSyncMessage =
   | ApplyAiWhiteboardOperations;
 
 const maximumPendingOperationBatches = 20;
+const maximumStoredWhiteboardFrameCharacters = 20_000_000;
 
 export type WhiteboardImageDifference = {
   changedPixelRatio: number;
   meanAbsoluteDifference: number;
 };
+
+export function isValidWhiteboardFrame(value: unknown): value is WhiteboardFrame {
+  if (!value || typeof value !== "object") return false;
+  const frame = value as Partial<WhiteboardFrame>;
+  return (
+    frame.type === "whiteboard-frame" &&
+    frame.mimeType === "image/jpeg" &&
+    typeof frame.data === "string" &&
+    frame.data.length >= 16 &&
+    frame.data.length <= maximumStoredWhiteboardFrameCharacters &&
+    /^[A-Za-z0-9+/]*={0,2}$/.test(frame.data) &&
+    typeof frame.updatedAt === "number" &&
+    Number.isFinite(frame.updatedAt) &&
+    typeof frame.width === "number" &&
+    Number.isFinite(frame.width) &&
+    frame.width > 0 &&
+    frame.width <= 16_384 &&
+    typeof frame.height === "number" &&
+    Number.isFinite(frame.height) &&
+    frame.height > 0 &&
+    frame.height <= 16_384
+  );
+}
 
 export function calculateWhiteboardImageDifference(
   previous: number[] | undefined,

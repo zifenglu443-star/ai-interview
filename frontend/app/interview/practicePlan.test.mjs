@@ -5,6 +5,7 @@ import {
   defaultPracticePlan,
   loadPracticePlan,
   practicePlanStorageKey,
+  savePracticePlan,
 } from "./practicePlan.ts";
 
 function installStoredPlan(plan) {
@@ -22,7 +23,7 @@ test.afterEach(() => {
   delete globalThis.window;
 });
 
-test("version 4 clears older previews while preserving current API settings", () => {
+test("version 5 drops browser credentials and clears unverified old previews", () => {
   installStoredPlan({
     ...defaultPracticePlan,
     planFormatVersion: 3,
@@ -46,13 +47,13 @@ test("version 4 clears older previews while preserving current API settings", ()
 
   const loaded = loadPracticePlan();
 
-  assert.equal(loaded.planFormatVersion, 4);
+  assert.equal(loaded.planFormatVersion, 5);
   assert.deepEqual(loaded.plannedQuestions, []);
-  assert.equal(loaded.liveApis.google.apiKey, "google-browser-key");
-  assert.equal(loaded.plannerApi.apiKey, "planner-browser-key");
+  assert.equal("liveApis" in loaded, false);
+  assert.equal("plannerApi" in loaded, false);
 });
 
-test("version 4 keeps a preview generated with verified source mapping", () => {
+test("version 5 keeps a preview generated with verified source mapping", () => {
   installStoredPlan({
     ...defaultPracticePlan,
     plannedQuestions: [{
@@ -68,4 +69,28 @@ test("version 4 keeps a preview generated with verified source mapping", () => {
 
   assert.equal(loaded.plannedQuestions.length, 1);
   assert.equal(loaded.plannedQuestions[0].prompt, "Exact source question");
+});
+
+test("saving a plan uses an allowlist and never persists legacy credentials", () => {
+  let savedValue = "";
+  globalThis.window = {
+    localStorage: {
+      getItem() {
+        return null;
+      },
+      setItem(key, value) {
+        assert.equal(key, practicePlanStorageKey);
+        savedValue = value;
+      },
+    },
+  };
+
+  savePracticePlan({
+    ...defaultPracticePlan,
+    apiKey: "legacy-key",
+    liveApis: { google: { apiKey: "legacy-key" } },
+  });
+
+  assert.equal(savedValue.includes("legacy-key"), false);
+  assert.equal(JSON.parse(savedValue).planFormatVersion, 5);
 });

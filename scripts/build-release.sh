@@ -55,7 +55,7 @@ for item in \
   /usr/bin/rsync -a "$PROJECT_DIR/docs/$item" "$STAGING_DIR/docs/"
 done
 
-/usr/bin/rsync -a "$PROJECT_DIR/scripts/README.md" "$PROJECT_DIR/scripts/verify_google_live.py" "$PROJECT_DIR/scripts/build-release.sh" "$STAGING_DIR/scripts/"
+/usr/bin/rsync -a "$PROJECT_DIR/scripts/README.md" "$PROJECT_DIR/scripts/verify_google_live.py" "$PROJECT_DIR/scripts/launcher_revision.py" "$PROJECT_DIR/scripts/build-release.sh" "$STAGING_DIR/scripts/"
 /usr/bin/find "$STAGING_DIR" -name '.DS_Store' -delete
 /bin/chmod +x "$STAGING_DIR/Start AI Interview Simulator.command" "$STAGING_DIR/AI Interview Simulator.app/Contents/MacOS/launcher"
 /usr/bin/perl -pi -e 's/\r?\n/\r\n/g' "$STAGING_DIR/Start AI Interview Simulator.bat"

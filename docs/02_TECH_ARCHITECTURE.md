@@ -5,7 +5,7 @@
 ```text
 Browser (Next.js, 127.0.0.1:3001)
   ├─ Setup / plan preview / waiting room / interview / reports
-  ├─ Camera, WebRTC, tldraw, local storage
+  ├─ Camera, WebRTC, AudioWorklet, tldraw, local storage
   └─ Gemini Live audio client or OpenAI Realtime WebRTC
                   │
                   ▼
@@ -22,8 +22,8 @@ Director Engine (pure Python state machine)
 
 ## Ownership
 
-- `PracticePlan` owns pre-session role, focus, topic, voice provider, editable
-  Director settings, and optional local-browser planning-model settings.
+- `PracticePlan` owns pre-session role, focus, topic, voice provider, and
+  editable Director settings. It never contains provider credentials.
 - `DirectorSession` owns Start/End state, current question, answers, pressure,
   approved control signals, and an immutable copy of `DirectorConfig`.
 - Voice providers generate conversation but cannot directly mutate or end the Director.
@@ -63,8 +63,11 @@ cannot survive a backend restart.
 | Route | Responsibility |
 |---|---|
 | `GET /health` | Launcher readiness check |
+| `GET /configuration/status` | Return provider readiness and model names, never secrets |
+| `POST /configuration/provider` | Local-origin-only write to `.env`; accepts masked secret input and never returns it |
 | `POST /interview/plan` | Required provider-backed plan creation |
 | `POST /interview/start` | Create and lock one Director session |
+| `GET /interview/session/{session_id}` | Restore an unexpired Director session from a short-lived browser pointer |
 | `POST /interview/answer` | Guarded legacy route; reject typed progression that has not received live semantic review |
 | `POST /interview/live-control` | Review a provider control/whiteboard proposal and time-gated transition |
 | `POST /interview/verify-progress` | Asynchronously verify risky completion changes with the existing text model; never block Live |
@@ -115,14 +118,18 @@ microphone permissions, audio-context activation, the opening-question prompt,
 and Director lifecycle. Only the wire adapter differs: WebRTC for OpenAI and the
 local WebSocket proxy for Gemini.
 
-The browser sends a Gemini key in the first WebSocket message, not in the URL.
-The proxy then creates the upstream provider socket. This keeps the key out of
-local access-log URLs. Browser-stored keys still carry normal localStorage/XSS risk.
+Provider keys, models, and the planning endpoint are backend configuration read
+from `.env`. The API settings form may submit a new key only to the local backend
+from an allowlisted local Origin; the backend writes it with owner-only file
+permissions and returns readiness, never the secret. The browser never persists
+or refills a provider key. The planning endpoint is validated as HTTPS before
+it is written or used.
 
-The optional planning text-model key, endpoint, and model are sent only with
-`POST /interview/plan` to the local backend. Per-request endpoints must be valid
-HTTPS URLs without embedded credentials; this permits local user configuration
-without allowing the browser to request arbitrary local-network URLs.
+An active interview stores only its opaque session ID and timestamp in
+`sessionStorage`. After a frontend refresh, the backend can return the unexpired
+Director session and the user may explicitly resume it. Answers, transcripts,
+and provider credentials are not copied into this recovery pointer. A backend
+restart still invalidates active sessions.
 
 ## Whiteboard synchronization
 
@@ -146,8 +153,8 @@ Gemini's local 650ms silence detector is included in its total perceived latency
 
 ## Storage
 
-There is no active database. Browser local storage is used for the practice
-plan, whiteboard persistence, and current report. On completion or manual end,
+There is no active database. Browser local storage is used for the non-secret
+practice plan, whiteboard persistence, and current report. On completion or manual end,
 the backend archives each interview under `data/interview_records/` with its
 report plus stable evaluation, conversation, plan, and final whiteboard JPEG
 snapshot when available. Successfully archived sessions are removed from the
@@ -155,7 +162,21 @@ in-memory session registry. Archive files are first written into a temporary
 sibling directory; one atomic directory rename publishes the complete record.
 If writing fails, the temporary directory is removed and the finished session is
 restored so the user can retry. A concurrent duplicate archive cannot publish a
-second record.
+second record. Every published archive is copied atomically to the hidden
+`.backups/` directory. Missing or malformed primary JSON is restored from that
+copy on read; explicit record deletion removes both copies.
+
+## Runtime hardening
+
+- CORS accepts only explicit HTTP(S) origins, does not allow credentials, and
+  limits methods and headers to the local API contract.
+- Request logs include method, path, status, duration, and client address but
+  never request bodies or secrets.
+- A bounded per-client request rate protects public deployments from bursts.
+- Director sessions expire and the registry has a hard maximum, preventing
+  abandoned sessions from growing memory without bound.
+- Gemini reconnects with session resumption and capped exponential backoff while
+  the interview remains active.
 
 ## Active interviewer video module
 

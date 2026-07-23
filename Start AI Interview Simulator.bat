@@ -5,6 +5,7 @@ cd /d "%~dp0"
 set "FRONTEND_URL=http://127.0.0.1:3001/setup"
 set "BACKEND_URL=http://127.0.0.1:8000/health"
 set "LOG_DIR=%CD%\.runtime-logs"
+set "REVISION_FILE=%LOG_DIR%\runtime-revision"
 
 where node >nul 2>nul || goto :missing_node
 where npm >nul 2>nul || goto :missing_node
@@ -43,13 +44,22 @@ if not exist "frontend\node_modules" (
   call npm --prefix frontend ci || goto :failed
 )
 
+if not exist "%LOG_DIR%" mkdir "%LOG_DIR%"
+"%PYTHON%" "scripts\launcher_revision.py" --env ".env" > "%LOG_DIR%\source-revision.tmp" || goto :failed
+set /p SOURCE_REVISION=<"%LOG_DIR%\source-revision.tmp"
+del /Q "%LOG_DIR%\source-revision.tmp" >nul 2>nul
+set "RUNNING_REVISION="
+if exist "%REVISION_FILE%" set /p RUNNING_REVISION=<"%REVISION_FILE%"
+
 powershell -NoProfile -Command "try { Invoke-WebRequest -UseBasicParsing -TimeoutSec 1 '%BACKEND_URL%' ^| Out-Null; Invoke-WebRequest -UseBasicParsing -TimeoutSec 1 '%FRONTEND_URL%' ^| Out-Null; exit 0 } catch { exit 1 }"
-if %ERRORLEVEL% EQU 0 (
-  start "" "%FRONTEND_URL%"
+if %ERRORLEVEL% EQU 0 if "%RUNNING_REVISION%"=="%SOURCE_REVISION%" (
+  if not "%AI_INTERVIEW_NO_OPEN%"=="1" start "" "%FRONTEND_URL%"
+  if "%AI_INTERVIEW_NO_OPEN%"=="1" echo AI Interview Simulator is ready: %FRONTEND_URL%
   exit /b 0
 )
 
-if not exist "%LOG_DIR%" mkdir "%LOG_DIR%"
+powershell -NoProfile -Command "Get-NetTCPConnection -State Listen -LocalPort 3001,8000 -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess -Unique | ForEach-Object { Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue }"
+timeout /t 1 /nobreak >nul
 echo Building the interface. The first build may take a few minutes...
 call npm --prefix frontend run build || goto :failed
 
@@ -70,7 +80,9 @@ pause
 exit /b 1
 
 :ready
-start "" "%FRONTEND_URL%"
+> "%REVISION_FILE%" echo %SOURCE_REVISION%
+if not "%AI_INTERVIEW_NO_OPEN%"=="1" start "" "%FRONTEND_URL%"
+if "%AI_INTERVIEW_NO_OPEN%"=="1" echo AI Interview Simulator is ready: %FRONTEND_URL%
 exit /b 0
 
 :missing_node

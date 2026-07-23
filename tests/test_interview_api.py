@@ -1,5 +1,7 @@
 import json
 
+import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from backend.app import main
@@ -7,6 +9,16 @@ from backend.app.main import app
 
 
 client = TestClient(app)
+
+
+@pytest.fixture(autouse=True)
+def backend_planner_environment(monkeypatch) -> None:
+    monkeypatch.setenv("PLANNER_API_KEY", "backend-planner-key")
+    monkeypatch.setenv(
+        "PLANNER_API_ENDPOINT",
+        "https://planner.example/v1/chat/completions",
+    )
+    monkeypatch.setenv("PLANNER_MODEL", "existing-text-model")
 
 
 def test_start_interview_api() -> None:
@@ -18,6 +30,71 @@ def test_start_interview_api() -> None:
     assert payload["state"] == "asking"
     assert payload["question_index"] == 0
     assert payload["current_prompt"]
+
+
+def test_active_interview_session_can_be_reloaded() -> None:
+    started = client.post("/interview/start").json()
+
+    response = client.get(f"/interview/session/{started['session_id']}")
+
+    assert response.status_code == 200
+    assert response.json()["session_id"] == started["session_id"]
+    assert response.json()["state"] == started["state"]
+
+
+def test_interview_session_reload_rejects_invalid_id() -> None:
+    response = client.get("/interview/session/not%20a%20valid%20id")
+
+    assert response.status_code == 422
+
+
+def test_active_session_registry_is_bounded(monkeypatch) -> None:
+    monkeypatch.setattr(main, "MAX_ACTIVE_SESSIONS", 2)
+    monkeypatch.setattr(main, "sessions", {})
+    monkeypatch.setattr(main, "session_last_seen", {})
+
+    session_ids = [
+        client.post("/interview/start").json()["session_id"]
+        for _ in range(3)
+    ]
+
+    assert len(main.sessions) == 2
+    assert session_ids[0] not in main.sessions
+    assert session_ids[1] in main.sessions
+    assert session_ids[2] in main.sessions
+
+
+def test_archived_session_cannot_be_resurrected_by_a_stale_update() -> None:
+    session = client.post("/interview/start").json()
+    stale_session = main.get_active_session(session["session_id"])
+    with main.sessions_lock:
+        main.sessions.pop(session["session_id"], None)
+        main.session_last_seen.pop(session["session_id"], None)
+
+    with pytest.raises(HTTPException) as error:
+        main.store_session(session["session_id"], stale_session)
+
+    assert error.value.status_code == 409
+
+
+def test_concurrent_session_update_cannot_overwrite_newer_state() -> None:
+    started = client.post("/interview/start").json()
+    original = main.get_active_session(started["session_id"])
+    ended = main.director_engine.end(original)
+    main.store_session(
+        started["session_id"],
+        ended,
+        expected_session=original,
+    )
+
+    with pytest.raises(HTTPException) as error:
+        main.store_session(
+            started["session_id"],
+            original,
+            expected_session=original,
+        )
+
+    assert error.value.status_code == 409
 
 
 def test_progress_verifier_uses_existing_text_model_and_accepts_reasonable_increase(
@@ -83,11 +160,6 @@ def test_progress_verifier_uses_existing_text_model_and_accepts_reasonable_incre
             "covered_requirements": ["background"],
             "missing_requirements": [],
             "trigger_reasons": ["sudden_completion_increase", "completion_at_least_90"],
-            "planner": {
-                "api_key": "browser-planner-key",
-                "endpoint": "https://planner.example/v1/chat/completions",
-                "model": "existing-text-model",
-            },
         },
     )
 
@@ -162,11 +234,6 @@ def test_progress_verifier_rejects_depth_below_locked_high_expectation(monkeypat
             "covered_requirements": ["all explicit parts"],
             "missing_requirements": [],
             "trigger_reasons": ["completion_at_least_90", "move_on_proposed"],
-            "planner": {
-                "api_key": "browser-planner-key",
-                "endpoint": "https://planner.example/v1/chat/completions",
-                "model": "existing-text-model",
-            },
         },
     )
 
@@ -311,7 +378,7 @@ def test_plan_api_requires_a_configured_text_model(monkeypatch) -> None:
     )
 
     assert response.status_code == 503
-    assert response.json()["detail"] == "Planning API key is not configured. Add it in Settings or .env."
+    assert response.json()["detail"] == "Planning API key is not configured in .env."
 
 
 def test_plan_provider_preserves_numbered_multiline_questions(monkeypatch) -> None:
@@ -334,7 +401,7 @@ f(x)=x^3-3x. Find the values of k for which f(x)=k has three distinct real solut
     monkeypatch.setattr(main.httpx, "post", lambda *_args, **_kwargs: FakeResponse())
     response = client.post(
         "/interview/plan",
-        json={"practice_topics": topics, "total_duration_seconds": 900, "planner": {"api_key": "test"}},
+        json={"practice_topics": topics, "total_duration_seconds": 900},
     )
 
     assert response.status_code == 200
@@ -363,7 +430,6 @@ def test_plan_rejects_provider_output_that_merges_source_questions(monkeypatch) 
         "/interview/plan",
         json={
             "practice_topics": "1. First independent problem.\n2. Second independent problem.",
-            "planner": {"api_key": "test"},
         },
     )
 
@@ -387,7 +453,6 @@ def test_plan_rejects_provider_output_that_reorders_source_questions(monkeypatch
         "/interview/plan",
         json={
             "question_bank": "First question.\nSecond question.",
-            "planner": {"api_key": "test"},
         },
     )
 
@@ -410,7 +475,6 @@ def test_plan_preserves_a_single_numbered_question_with_continuation(monkeypatch
         "/interview/plan",
         json={
             "question_bank": "1. Solve the equation\nx^2 - 1 = 0",
-            "planner": {"api_key": "test"},
         },
     )
 
@@ -433,7 +497,6 @@ def test_plan_preserves_question_text_after_a_bare_number_marker(monkeypatch) ->
         "/interview/plan",
         json={
             "question_bank": "1.\nExplain the invariant.\nInclude the proof.",
-            "planner": {"api_key": "test"},
         },
     )
 
@@ -451,7 +514,6 @@ def test_plan_rejects_empty_numbered_questions_before_calling_provider(monkeypat
         "/interview/plan",
         json={
             "question_bank": "1.\n2. A real question.",
-            "planner": {"api_key": "test"},
         },
     )
 
@@ -469,7 +531,6 @@ def test_plan_rejects_more_than_twenty_source_items(monkeypatch) -> None:
         "/interview/plan",
         json={
             "practice_topics": "\n".join(f"Topic {index}" for index in range(21)),
-            "planner": {"api_key": "test"},
         },
     )
 
@@ -489,9 +550,10 @@ def test_start_requires_a_generated_plan_for_supplied_topics() -> None:
     assert response.json()["detail"] == "Generate a text-model interview plan before starting this interview."
 
 
-def test_plan_api_accepts_browser_planner_settings(monkeypatch) -> None:
-    monkeypatch.delenv("PLANNER_API_KEY", raising=False)
-    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+def test_plan_api_uses_backend_planner_settings(monkeypatch) -> None:
+    monkeypatch.setenv("PLANNER_API_KEY", "backend-key")
+    monkeypatch.setenv("PLANNER_API_ENDPOINT", "https://planner.example/v1/chat/completions")
+    monkeypatch.setenv("PLANNER_MODEL", "planning-model")
     captured: dict[str, object] = {}
 
     class FakeResponse:
@@ -533,11 +595,6 @@ def test_plan_api_accepts_browser_planner_settings(monkeypatch) -> None:
         "/interview/plan",
         json={
             "total_duration_seconds": 600,
-            "planner": {
-                "api_key": "browser-key",
-                "endpoint": "https://planner.example/v1/chat/completions",
-                "model": "planning-model",
-            },
         },
     )
 
@@ -546,7 +603,7 @@ def test_plan_api_accepts_browser_planner_settings(monkeypatch) -> None:
     assert response.json()["model"] == "planning-model"
     assert captured["endpoint"] == "https://planner.example/v1/chat/completions"
     assert captured["headers"] == {
-        "Authorization": "Bearer browser-key",
+        "Authorization": "Bearer backend-key",
         "Content-Type": "application/json",
     }
     prompt = captured["json"]["messages"][1]["content"]  # type: ignore[index]
@@ -555,13 +612,13 @@ def test_plan_api_accepts_browser_planner_settings(monkeypatch) -> None:
     assert '"source_id": "source-1"' in prompt
 
 
-def test_plan_api_rejects_non_https_browser_planner_endpoint() -> None:
+def test_plan_api_rejects_browser_planner_credentials() -> None:
     response = client.post(
         "/interview/plan",
         json={
             "planner": {
                 "api_key": "browser-key",
-                "endpoint": "http://127.0.0.1:8000/unsafe",
+                "endpoint": "https://attacker.example/unsafe",
                 "model": "planning-model",
             }
         },
@@ -1018,10 +1075,12 @@ def test_archive_interview_writes_report_conversation_and_whiteboard(tmp_path, m
     assert response.status_code == 200
     assert response.json()["evaluation"]["rubric_version"] == "local-heuristic-v2"
     record_directory = tmp_path / response.json()["record_id"]
+    backup_directory = tmp_path / ".backups" / response.json()["record_id"]
     assert (record_directory / "report.json").exists()
     assert (record_directory / "conversation.json").exists()
     assert (record_directory / "plan.json").exists()
     assert (record_directory / "whiteboard.jpg").read_bytes() == b"\xff\xd8\xff\xd9"
+    assert (backup_directory / "report.json").exists()
 
     report = json.loads((record_directory / "report.json").read_text())
     assert report["evaluation"]["rubric_version"] == "local-heuristic-v2"
@@ -1040,6 +1099,12 @@ def test_archive_interview_writes_report_conversation_and_whiteboard(tmp_path, m
     detail = client.get(f"/interview/records/{record_directory.name}")
     assert detail.status_code == 200
     assert detail.json()["conversation"]["answer_summaries"][0]["candidate_summary"]
+
+    (record_directory / "report.json").write_text("{corrupt", encoding="utf-8")
+    recovered = client.get(f"/interview/records/{record_directory.name}")
+    assert recovered.status_code == 200
+    assert recovered.json()["report"]["completed_at"] == "2026-07-13T10:00:00Z"
+    assert json.loads((record_directory / "report.json").read_text())["completed_at"]
 
     whiteboard = client.get(f"/interview/records/{record_directory.name}/whiteboard")
     assert whiteboard.status_code == 200
@@ -1063,6 +1128,7 @@ def test_archive_interview_writes_report_conversation_and_whiteboard(tmp_path, m
     assert deleted.status_code == 200
     assert deleted.json() == {"record_id": record_directory.name, "deleted": True}
     assert not record_directory.exists()
+    assert not backup_directory.exists()
 
 
 def test_archive_failure_restores_session_and_removes_partial_record(tmp_path, monkeypatch) -> None:

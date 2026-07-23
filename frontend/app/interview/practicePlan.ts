@@ -20,17 +20,6 @@ export type DirectorSettings = {
   totalDurationMinutes: 10 | 15 | 20 | 30;
 };
 
-export type LiveApiSettings = {
-  apiKey: string;
-  model: string;
-};
-
-export type PlannerApiSettings = {
-  apiKey: string;
-  endpoint: string;
-  model: string;
-};
-
 export type PlannedInterviewQuestion = {
   id: string;
   prompt: string;
@@ -40,15 +29,13 @@ export type PlannedInterviewQuestion = {
 };
 
 export type PracticePlan = {
-  planFormatVersion: 4;
+  planFormatVersion: 5;
   targetRole: string;
   focus: PracticeFocus;
   topics: string;
   voiceProvider: VoiceProviderId;
   questionBank: string;
   allowAiWhiteboardAnnotations: boolean;
-  liveApis: Record<VoiceProviderId, LiveApiSettings>;
-  plannerApi: PlannerApiSettings;
   directorSettings: DirectorSettings;
   plannedQuestions: PlannedInterviewQuestion[];
 };
@@ -56,18 +43,13 @@ export type PracticePlan = {
 export const practicePlanStorageKey = "ai-interview-simulator.practice-plan";
 
 export const defaultPracticePlan: PracticePlan = {
-  planFormatVersion: 4,
+  planFormatVersion: 5,
   targetRole: "Student or internship role",
   focus: "behavioral",
   topics: "",
   voiceProvider: "google",
   questionBank: "",
   allowAiWhiteboardAnnotations: true,
-  liveApis: {
-    openai: { apiKey: "", model: "gpt-realtime-2.1" },
-    google: { apiKey: "", model: "gemini-3.1-flash-live-preview" },
-  },
-  plannerApi: { apiKey: "", endpoint: "", model: "" },
   directorSettings: {
     interviewerStyle: "professional",
     initialPressure: "low",
@@ -105,7 +87,7 @@ export function loadPracticePlan(): PracticePlan {
       planFormatVersion?: number;
     };
     return {
-      planFormatVersion: 4,
+      planFormatVersion: 5,
       targetRole: parsed.targetRole?.trim() || defaultPracticePlan.targetRole,
       focus: isPracticeFocus(parsed.focus) ? parsed.focus : defaultPracticePlan.focus,
       topics: parsed.topics?.trim() ?? "",
@@ -117,19 +99,12 @@ export function loadPracticePlan(): PracticePlan {
         typeof parsed.allowAiWhiteboardAnnotations === "boolean"
           ? parsed.allowAiWhiteboardAnnotations
           : defaultPracticePlan.allowAiWhiteboardAnnotations,
-      // Versions before 3 may contain stale browser keys that override fresh
-      // project .env values. Preserve settings from version 3 onward.
-      liveApis: (parsed.planFormatVersion ?? 0) >= 3
-        ? parseLiveApis(parsed.liveApis)
-        : defaultPracticePlan.liveApis,
-      plannerApi: (parsed.planFormatVersion ?? 0) >= 3
-        ? parsePlannerApi(parsed.plannerApi)
-        : defaultPracticePlan.plannerApi,
       directorSettings: parseDirectorSettings(parsed.directorSettings),
-      // Version 4 adds verified one-to-one source mapping. Older previews may
+      // Version 4 added verified one-to-one source mapping. Version 5 removes
+      // legacy browser-stored API credentials while preserving valid previews.
       // contain merged, omitted, reordered, or rewritten source questions.
       plannedQuestions:
-        parsed.planFormatVersion === 4
+        (parsed.planFormatVersion ?? 0) >= 4
           ? parsePlannedQuestions(parsed.plannedQuestions)
           : [],
     };
@@ -143,7 +118,20 @@ function isVoiceProviderId(value: unknown): value is VoiceProviderId {
 }
 
 export function savePracticePlan(plan: PracticePlan) {
-  window.localStorage.setItem(practicePlanStorageKey, JSON.stringify(plan));
+  // Serialize an explicit allowlist so credentials left by older versions can
+  // never be written back through a widened object at runtime.
+  const safePlan: PracticePlan = {
+    planFormatVersion: 5,
+    targetRole: plan.targetRole,
+    focus: plan.focus,
+    topics: plan.topics,
+    voiceProvider: plan.voiceProvider,
+    questionBank: plan.questionBank,
+    allowAiWhiteboardAnnotations: plan.allowAiWhiteboardAnnotations,
+    directorSettings: plan.directorSettings,
+    plannedQuestions: plan.plannedQuestions,
+  };
+  window.localStorage.setItem(practicePlanStorageKey, JSON.stringify(safePlan));
 }
 
 function isPracticeFocus(value: unknown): value is PracticeFocus {
@@ -169,29 +157,6 @@ function parsePlannedQuestions(value: unknown): PlannedInterviewQuestion[] {
       allocated_seconds: Number.isFinite(question.allocated_seconds) ? Math.max(30, Number(question.allocated_seconds)) : 0,
     }];
   });
-}
-
-function parseLiveApis(value: unknown): Record<VoiceProviderId, LiveApiSettings> {
-  const stored = (value ?? {}) as Partial<Record<VoiceProviderId, Partial<LiveApiSettings>>>;
-  return {
-    openai: {
-      apiKey: stored.openai?.apiKey ?? "",
-      model: stored.openai?.model?.trim() || defaultPracticePlan.liveApis.openai.model,
-    },
-    google: {
-      apiKey: stored.google?.apiKey ?? "",
-      model: stored.google?.model?.trim() || defaultPracticePlan.liveApis.google.model,
-    },
-  };
-}
-
-function parsePlannerApi(value: unknown): PlannerApiSettings {
-  const stored = (value ?? {}) as Partial<PlannerApiSettings>;
-  return {
-    apiKey: stored.apiKey ?? "",
-    endpoint: stored.endpoint?.trim() ?? "",
-    model: stored.model?.trim() ?? "",
-  };
 }
 
 function parseDirectorSettings(value: unknown): DirectorSettings {

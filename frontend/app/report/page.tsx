@@ -6,8 +6,8 @@ import {
   interviewStorageKey,
   type InterviewReport,
 } from "../interview/interviewSession";
-import { loadPracticePlan } from "../interview/practicePlan";
 import { evaluateReport, type ReportScores } from "./evaluator";
+import AppNav from "../components/AppNav";
 
 export default function ReportPage() {
   const [report, setReport] = useState<InterviewReport | null>(null);
@@ -37,7 +37,6 @@ export default function ReportPage() {
       apiBase,
       report.answers,
       report.totalQuestions,
-      loadPracticePlan().plannerApi,
     )
       .then((result) => {
         if (active) setScores(result);
@@ -61,10 +60,7 @@ export default function ReportPage() {
 
   return (
     <main className="page-shell">
-      <nav className="topbar" aria-label="Report navigation">
-        <Link href="/">AI Interview Simulator</Link>
-        <Link href="/reports">Interview history</Link>
-      </nav>
+      <AppNav />
 
       <section className="report-layout">
         <div>
@@ -81,6 +77,9 @@ export default function ReportPage() {
           <article>
             <span>Overall</span>
             <strong>{scores ? formatScore(scores, scores.overall) : scoreError ? "Unavailable" : "Pending"}</strong>
+            {scores?.sufficient_evidence !== false ? (
+              <small>{interpretScore(scores?.overall)}</small>
+            ) : null}
           </article>
           <article>
             <span>Reasoning depth</span>
@@ -126,10 +125,11 @@ export default function ReportPage() {
         ) : null}
 
         {scores ? (
-          <section className="answer-summary">
+          <section className="answer-summary suggestion-summary">
             <h2>Suggestions</h2>
-            {scores.suggestions.map((suggestion) => (
-              <article key={suggestion}>
+            {scores.suggestions.map((suggestion, index) => (
+              <article className={index === 0 ? "suggestion-priority" : ""} key={suggestion}>
+                {index === 0 ? <span>Start here</span> : null}
                 <p>{suggestion}</p>
               </article>
             ))}
@@ -194,4 +194,12 @@ function isValidDate(value: string) {
 
 function formatScore(scores: ReportScores, value: number): string {
   return scores.sufficient_evidence === false ? "Not enough evidence" : String(value);
+}
+
+function interpretScore(value: number | undefined): string {
+  if (value === undefined) return "";
+  if (value >= 85) return "Strong, consistent evidence";
+  if (value >= 70) return "Solid foundation";
+  if (value >= 50) return "Developing";
+  return "Needs focused practice";
 }

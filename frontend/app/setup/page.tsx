@@ -1,25 +1,29 @@
 "use client";
 
-import Link from "next/link";
-import { type ChangeEvent, type FormEvent, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
+import {
+  type ChangeEvent,
+  type FormEvent,
+  useEffect,
+  useState,
+} from "react";
+
+import AppNav from "../components/AppNav";
 import {
   defaultPracticePlan,
   loadPracticePlan,
-  practiceFocusLabels,
   savePracticePlan,
-  type PracticeFocus,
   type PracticePlan,
-  type FollowUpDepth,
-  type InterruptionFrequency,
-  type InterviewerStyle,
-  type PressureLevel,
-  type VoiceProviderId,
-  voiceProviderLabels,
 } from "../interview/practicePlan";
+import SetupWizard, {
+  SetupIntro,
+  type SetupStep,
+} from "./SetupWizard";
+import { validatePlanInput } from "./setupFlow";
 
 export default function SetupPage() {
   const router = useRouter();
+  const [step, setStep] = useState<SetupStep>(1);
   const [plan, setPlan] = useState<PracticePlan>(defaultPracticePlan);
   const [isPlanning, setIsPlanning] = useState(false);
   const [planningError, setPlanningError] = useState<string | null>(null);
@@ -32,7 +36,8 @@ export default function SetupPage() {
   function submitSetup(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!plan.plannedQuestions.length) {
-      setPlanningError("Generate a text-model interview plan before entering the waiting room.");
+      setPlanningError("Generate an interview plan before entering the waiting room.");
+      setStep(2);
       return;
     }
     try {
@@ -43,7 +48,9 @@ export default function SetupPage() {
       });
       router.push("/interview");
     } catch {
-      setPlanningError("Could not save setup in this browser. Clear local site data and try again.");
+      setPlanningError(
+        "Setup could not be saved. Exit private browsing or free some browser storage, then try again.",
+      );
     }
   }
 
@@ -55,301 +62,98 @@ export default function SetupPage() {
       event.target.value = "";
       return;
     }
-    void file.text().then((text) => {
-      setPlanningError(null);
-      setPlan((current) => ({ ...current, questionBank: text, plannedQuestions: [] }));
-    }).catch(() => setPlanningError("Could not read that question file."));
+    void file
+      .text()
+      .then((text) => {
+        setPlanningError(null);
+        setPlan((current) => ({
+          ...current,
+          questionBank: text,
+          plannedQuestions: [],
+        }));
+      })
+      .catch(() => setPlanningError("The selected question file could not be read."));
   }
 
-  async function generatePlan() {
+  async function generatePlan(): Promise<boolean> {
+    const validationError = validatePlanInput(plan);
+    if (validationError) {
+      setPlanningError(validationError);
+      return false;
+    }
+
     setIsPlanning(true);
     setPlanningError(null);
     try {
-      const baseUrl = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://127.0.0.1:8000";
+      const baseUrl =
+        process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://127.0.0.1:8000";
       const response = await fetch(`${baseUrl}/interview/plan`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          target_role: plan.targetRole,
+          target_role: plan.targetRole.trim(),
           practice_focus: plan.focus,
-          practice_topics: plan.topics,
+          practice_topics: plan.topics.trim(),
           question_bank: plan.questionBank,
-          total_duration_seconds: plan.directorSettings.totalDurationMinutes * 60,
-          planner: {
-            api_key: plan.plannerApi.apiKey,
-            endpoint: plan.plannerApi.endpoint,
-            model: plan.plannerApi.model,
-          },
+          total_duration_seconds:
+            plan.directorSettings.totalDurationMinutes * 60,
         }),
       });
       if (!response.ok) {
-        const payload = await response.json().catch(() => null) as { detail?: string } | null;
+        const payload = (await response.json().catch(() => null)) as {
+          detail?: string;
+        } | null;
         throw new Error(payload?.detail || "Planning request failed.");
       }
-      const result = await response.json() as { provider: "provider"; questions: PracticePlan["plannedQuestions"] };
-      if (!result.questions.length) throw new Error("Planning returned no questions");
-      setPlan((current) => ({ ...current, plannedQuestions: result.questions }));
+      const result = (await response.json()) as {
+        provider: "provider";
+        questions: PracticePlan["plannedQuestions"];
+      };
+      if (!result.questions.length) {
+        throw new Error("The planner returned no questions.");
+      }
+      setPlan((current) => ({
+        ...current,
+        plannedQuestions: result.questions,
+      }));
       setPlanningSource(result.provider);
+      return true;
     } catch (error) {
-      setPlanningError(error instanceof Error ? error.message : "Could not generate a plan.");
+      setPlanningError(
+        error instanceof Error
+          ? error.message
+          : "The interview plan could not be generated.",
+      );
+      return false;
     } finally {
       setIsPlanning(false);
     }
   }
 
+  async function continueToPlanReview() {
+    if (await generatePlan()) {
+      setStep(3);
+    }
+  }
+
   return (
     <main className="page-shell">
-      <nav className="topbar" aria-label="Setup navigation">
-        <Link href="/">AI Interview Simulator</Link>
-        <Link href="/reports">Interview history</Link>
-        <Link href="/settings">API settings</Link>
-      </nav>
-
+      <AppNav />
       <section className="setup-layout">
-        <div className="setup-copy">
-          <p className="eyebrow">Session setup</p>
-          <h1>Prepare the room before the interviewer joins.</h1>
-          <p>
-            Choose the role and interview tone before entering the room.
-          </p>
-          <section className="answer-summary" aria-live="polite">
-            <h2>Interview plan preview</h2>
-            {plan.plannedQuestions.length ? plan.plannedQuestions.map((question, index) => (
-              <article key={question.id}>
-                <strong>{index + 1}. ~{Math.max(1, Math.round(question.allocated_seconds / 60))} min · {question.focus}</strong>
-                <p>{question.prompt}</p>
-              </article>
-            )) : <p>Generate a plan to preview the actual questions and time allocation before entering the room.</p>}
-            {plan.plannedQuestions.length && planningSource ? (
-              <p className="input-hint">
-                Generated by the configured planning provider.
-              </p>
-            ) : null}
-          </section>
-        </div>
-
+        <SetupIntro step={step} />
         <form className="setup-form" onSubmit={submitSetup}>
-          <label>
-            Target role
-            <input
-              name="role"
-              onChange={(event) =>
-                setPlan((current) => ({
-                  ...current,
-                  targetRole: event.target.value,
-                  plannedQuestions: [],
-                }))
-              }
-              placeholder="Software Engineering Intern"
-              value={plan.targetRole}
-            />
-          </label>
-
-          <label>
-            Today's practice focus
-            <select
-              name="focus"
-              onChange={(event) =>
-                setPlan((current) => ({
-                  ...current,
-                  focus: event.target.value as PracticeFocus,
-                  plannedQuestions: [],
-                }))
-              }
-              value={plan.focus}
-            >
-              {Object.entries(practiceFocusLabels).map(([value, label]) => (
-                <option key={value} value={value}>
-                  {label}
-                </option>
-              ))}
-            </select>
-          </label>
-
-          <label>
-            Live interviewer model
-            <select
-              onChange={(event) =>
-                setPlan((current) => ({
-                  ...current,
-                  voiceProvider: event.target.value as VoiceProviderId,
-                }))
-              }
-              value={plan.voiceProvider}
-            >
-              <option value="openai">{voiceProviderLabels.openai}</option>
-              <option value="google">{voiceProviderLabels.google}</option>
-            </select>
-          </label>
-
-          <fieldset className="director-setup-panel">
-            <legend>Director settings</legend>
-            <p>
-              Configure the room before the interview. These controls lock when
-              the session starts.
-            </p>
-            <div className="director-setup-grid">
-              <label>
-                Interviewer style
-                <select
-                  onChange={(event) =>
-                    setPlan((current) => ({
-                      ...current,
-                      directorSettings: {
-                        ...current.directorSettings,
-                        interviewerStyle: event.target.value as InterviewerStyle,
-                      },
-                    }))
-                  }
-                  value={plan.directorSettings.interviewerStyle}
-                >
-                  <option value="friendly">Friendly</option>
-                  <option value="professional">Professional</option>
-                  <option value="strict">Strict</option>
-                </select>
-              </label>
-              <label>
-                Initial pressure
-                <select
-                  onChange={(event) =>
-                    setPlan((current) => ({
-                      ...current,
-                      directorSettings: {
-                        ...current.directorSettings,
-                        initialPressure: event.target.value as PressureLevel,
-                      },
-                    }))
-                  }
-                  value={plan.directorSettings.initialPressure}
-                >
-                  <option value="low">Low</option>
-                  <option value="medium">Medium</option>
-                  <option value="high">High</option>
-                </select>
-              </label>
-              <label>
-                Expected reasoning depth
-                <select
-                  onChange={(event) =>
-                    setPlan((current) => ({
-                      ...current,
-                      directorSettings: {
-                        ...current.directorSettings,
-                        followUpDepth: event.target.value as FollowUpDepth,
-                      },
-                    }))
-                  }
-                  value={plan.directorSettings.followUpDepth}
-                >
-                  <option value="light">Low · answer each requested part</option>
-                  <option value="standard">Medium · connect every key step</option>
-                  <option value="deep">High · explain why the steps work</option>
-                </select>
-                <span className="input-hint">Controls when the whole question counts as complete, not how many times the interviewer may ask.</span>
-              </label>
-              <label>
-                Interruption frequency
-                <select
-                  onChange={(event) =>
-                    setPlan((current) => ({
-                      ...current,
-                      directorSettings: {
-                        ...current.directorSettings,
-                        interruptionFrequency: event.target
-                          .value as InterruptionFrequency,
-                      },
-                    }))
-                  }
-                  value={plan.directorSettings.interruptionFrequency}
-                >
-                  <option value="low">Low</option>
-                  <option value="medium">Medium</option>
-                  <option value="high">High</option>
-                </select>
-              </label>
-            </div>
-          </fieldset>
-
-          <label>
-            Questions or topics for today
-            <textarea
-              name="topics"
-              onChange={(event) =>
-                setPlan((current) => ({ ...current, topics: event.target.value, plannedQuestions: [] }))
-              }
-              placeholder="Examples: Explain the architecture of my project. Ask me about binary search. Practise a UCL internship behavioural question."
-              rows={5}
-              value={plan.topics}
-            />
-            <span className="input-hint">For complete questions, begin each one with 1., 2., 3., and so on; wrapped text and formula lines stay with that question. To have the model create questions from topics, write one unnumbered topic per line.</span>
-          </label>
-
-          <label>
-            Reference interview duration
-            <select
-              onChange={(event) =>
-                setPlan((current) => ({
-                  ...current,
-                  directorSettings: {
-                    ...current.directorSettings,
-                    totalDurationMinutes: Number(event.target.value) as 10 | 15 | 20 | 30,
-                  },
-                  plannedQuestions: [],
-                }))
-              }
-              value={plan.directorSettings.totalDurationMinutes}
-            >
-              <option value={10}>10 minutes</option>
-              <option value={15}>15 minutes</option>
-              <option value={20}>20 minutes</option>
-              <option value={30}>30 minutes</option>
-            </select>
-            <span className="input-hint">A reference for pacing and time allocation. Locked questions are not skipped merely to save time.</span>
-          </label>
-
-          <label className="checkbox-row">
-            <input
-              checked={plan.allowAiWhiteboardAnnotations}
-              onChange={(event) =>
-                setPlan((current) => ({
-                  ...current,
-                  allowAiWhiteboardAnnotations: event.target.checked,
-                }))
-              }
-              type="checkbox"
-            />
-            <span>
-              Allow reviewed AI whiteboard annotations
-              <small>Questions are still shown on the board. Turn this off to prevent automatic circles, lines, arrows, highlights, and notes.</small>
-            </span>
-          </label>
-
-          <label>
-            Upload interview questions / past questions
-            <input
-              accept=".txt,.md,.csv,text/plain,text/markdown,text/csv"
-              onChange={importQuestions}
-              type="file"
-            />
-            <span className="input-hint">
-              {plan.questionBank.trim()
-                ? "Loaded. Numbered questions and blank-separated paragraphs are kept as separate questions; wrapped text and formula lines stay with the current question. This file takes priority for this interview."
-                : "Optional. Use numbered questions or blank-separated paragraphs; wrapped text and formula lines stay with the current question. Uploaded questions take priority for this interview."}
-            </span>
-          </label>
-
-          <p className="setup-note">
-            Manage live interviewer API keys in <Link href="/settings">Settings</Link>. The planning provider is configured in the project environment.
-          </p>
-
-          <button className="secondary-action full-width" disabled={isPlanning} onClick={() => void generatePlan()} type="button">
-            {isPlanning ? "Generating plan…" : "Generate interview plan"}
-          </button>
-          {planningError ? <p className="error-message">{planningError}</p> : null}
-
-          <button className="primary-action full-width" type="submit">
-            Enter waiting room
-          </button>
+          <SetupWizard
+            isPlanning={isPlanning}
+            onContinueToReview={continueToPlanReview}
+            onGeneratePlan={generatePlan}
+            onImportQuestions={importQuestions}
+            plan={plan}
+            planningError={planningError}
+            planningSource={planningSource}
+            setPlan={setPlan}
+            setStep={setStep}
+            step={step}
+          />
         </form>
       </section>
     </main>

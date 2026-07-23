@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   appendPendingWhiteboardOperation,
   calculateWhiteboardImageDifference,
+  isValidWhiteboardFrame,
   isMaterialWhiteboardDifference,
   parsePendingWhiteboardOperations,
   removePendingWhiteboardOperation,
@@ -66,4 +67,20 @@ test("whiteboard image comparison detects a meaningful changed region", () => {
 test("missing fingerprints upload conservatively", () => {
   assert.equal(calculateWhiteboardImageDifference(undefined, [1, 2]), null);
   assert.equal(isMaterialWhiteboardDifference(null), true);
+});
+
+test("stored whiteboard frames require a valid bounded JPEG payload", () => {
+  const frame = {
+    type: "whiteboard-frame",
+    data: "YWJjZGVmZ2hpamtsbW5vcA==",
+    mimeType: "image/jpeg",
+    updatedAt: 1_000,
+    width: 1280,
+    height: 720,
+  };
+
+  assert.equal(isValidWhiteboardFrame(frame), true);
+  assert.equal(isValidWhiteboardFrame({ ...frame, data: "not base64!" }), false);
+  assert.equal(isValidWhiteboardFrame({ ...frame, width: 0 }), false);
+  assert.equal(isValidWhiteboardFrame({ ...frame, height: 20_000 }), false);
 });

@@ -9,7 +9,7 @@
     "start:backend": ".venv/bin/python -m uvicorn backend.app.main:app --host 127.0.0.1 --port 8000",
     "build": "npm --prefix frontend run build",
     "test": ".venv/bin/python -m pytest",
-    "test:frontend": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --test frontend/lib/telemetry/eventLogger.test.mjs frontend/app/interview/interviewSession.test.mjs frontend/app/interview/interviewerVideoState.test.mjs frontend/app/interview/openAiRealtimeLifecycle.test.mjs frontend/app/interview/practicePlan.test.mjs frontend/app/whiteboard/whiteboardSync.test.mjs",
+    "test:frontend": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --test frontend/lib/telemetry/eventLogger.test.mjs frontend/app/interview/googleLiveClient.test.mjs frontend/app/interview/interviewSession.test.mjs frontend/app/interview/interviewerVideoState.test.mjs frontend/app/interview/openAiRealtimeLifecycle.test.mjs frontend/app/interview/practicePlan.test.mjs frontend/app/interview/sessionRecovery.test.mjs frontend/app/interview/hooks/useInterviewPacing.test.mjs frontend/app/reports/reportHistory.test.mjs frontend/app/settings/configurationError.test.mjs frontend/app/setup/setupFlow.test.mjs frontend/app/whiteboard/whiteboardSync.test.mjs",
     "verify": "npm run build && npm run test && npm run test:frontend"
   }
 }

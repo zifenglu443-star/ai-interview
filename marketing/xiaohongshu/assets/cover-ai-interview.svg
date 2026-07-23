@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="1086" height="1448" viewBox="0 0 1086 1448">
+  <image x="0" y="0" width="1086" height="1448" xlink:href="cover-ai-interview-base.png" preserveAspectRatio="xMidYMid slice"/>
+  <rect x="0" y="0" width="1086" height="520" fill="#030817" opacity="0.48"/>
+  <rect x="74" y="72" width="330" height="54" rx="27" fill="#1677ff" opacity="0.95"/>
+  <text x="239" y="109" text-anchor="middle" fill="#FFFFFF" font-size="25" font-family="PingFang SC, sans-serif" font-weight="600" letter-spacing="2">OPEN SOURCE PROJECT</text>
+  <text x="74" y="220" fill="#F5F9FF" font-size="76" font-family="PingFang SC, sans-serif" font-weight="700">面试前</text>
+  <text x="74" y="320" fill="#F5F9FF" font-size="76" font-family="PingFang SC, sans-serif" font-weight="700">先练到不慌</text>
+  <rect x="74" y="364" width="20" height="20" rx="10" fill="#26E8B4"/>
+  <text x="112" y="383" fill="#D9E8FF" font-size="29" font-family="PingFang SC, sans-serif" font-weight="500">AI 模拟面试 · 实时追问 · 复盘报告</text>
+  <rect x="74" y="1240" width="650" height="62" rx="31" fill="#071B3D" opacity="0.88"/>
+  <text x="104" y="1281" fill="#C9DCFF" font-size="27" font-family="PingFang SC, sans-serif" font-weight="500">github.com/zifenglu443-star/ai-interview</text>
+</svg>
