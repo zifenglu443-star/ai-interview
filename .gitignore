@@ -10,4 +10,7 @@ data/interview_records/
 *.log
 *.tsbuildinfo
 *.zip
-dist/
+dist/*
+!dist/AI-Interview-Simulator-GitHub.zip
+!dist/AI-Interview-Simulator-GitHub.zip.sha256
+marketing/xiaohongshu/
